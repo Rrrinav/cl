@@ -13,13 +13,8 @@ int main(int argc, char *argv[])
     parser.cfg_.allow_short_value_concat = true;            // -I/path
     parser.cfg_.value_binding = cl::P_SPACE | cl::P_EQUAL;  // --opt val or --opt=val
 
-    // -- Boolean Flag (Implicit 'false' default)
-    // Usage: --verbose, -v
     auto verbose_id = parser.add(cl::Opt<bool>{{"verbose", "v"}, "Enable verbose logging"});
 
-    // -- Integer with Range Validator
-    // Note: Internally stored as 'long long' (Canonical type for integers)
-    // Usage: --count 10, -c=10
     auto count_id = parser.add(cl::Opt<int>{{"count", "c"}, "Number of iterations"}.deflt(1).validators(cl::Range<int>(1, 100)));
 
     // -- String Option with Default
@@ -66,11 +61,13 @@ int main(int argc, char *argv[])
     // Even though we passed cl::Opt<int>, the internal storage is long long.
     // We must request long long to avoid pointer casting errors.
     long long count = parser.get<long long>(count_id);
+    long long count1 = parser.get<cl::Num>(count_id);
 
     const std::string &name = parser.get<std::string>(name_id);
 
     // Arrays are stored as std::array<Canonical, N>
     const auto &coords = parser.get<std::array<double, 3>>(coords_id);
+    const auto &coords2 = parser.get<std::array<cl::Fp_Num, 3>>(coords_id);
 
     // Multi values are stored as std::vector<Canonical>
     const auto &excludes = parser.get<std::vector<long long>>(exclude_id);
