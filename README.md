@@ -4,13 +4,7 @@
 
 ## Bugs
 
-- We are not checking repeated scalar
-- We are not handling commas properly
-- We are not handling short falg concatenation
-- We are not handling -ve numbers because '-' minus sign can show a new option too.
 - Long single letter name may collide with short names.
-- No bound checks on arity
-- opt->type could be corrupted in switch case
 
 ## TODOs
 

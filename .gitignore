@@ -2,3 +2,4 @@ Session.vim
 cl
 compile_commands.json
 main
+bin/
