@@ -1,14 +1,11 @@
 #ifndef __CL_HPP_
 #define __CL_HPP_
 
-#warning "Not developed thing at all"
-
 #include <sys/types.h>
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cctype>
-#include <charconv>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +16,6 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
-#include <ranges>
 #include <new>
 #include <optional>
 #include <print>
@@ -29,46 +25,28 @@
 #include <string_view>
 #include <tuple>
 #include <type_traits>
-#include <typeinfo>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 #include <variant>
 
 // -----------------------------------------------------------------------------
-// CONFIGURATION & MACROS
+//  CONFIGURATION & MACROS
 // -----------------------------------------------------------------------------
 
-#ifndef CL_DEBUG_LEVEL
-    #define CL_DEBUG_LEVEL 0
-#endif
-
 namespace cl::debug {
-
-template <typename... Args>
-inline auto l1(std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if constexpr (CL_DEBUG_LEVEL >= 1)
-        std::println(stderr, "[CL_DBG: L1]: {}", std::format(fmt, std::forward<Args>(args)...));
-}
-
-template <typename... Args>
-inline auto l2(std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if constexpr (CL_DEBUG_LEVEL >= 2)
-        std::println(stderr, "[CL_DBG: L2]:   -> {}", std::format(fmt, std::forward<Args>(args)...));
-}
-
-template <typename... Args>
-inline auto l3(std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if constexpr (CL_DEBUG_LEVEL >= 3)
-        std::println(stderr, "[CL_DBG: L3]:         -> {}", std::format(fmt, std::forward<Args>(args)...));
-}
-
+[[noreturn]]
 inline auto todo(std::string &&s, std::source_location loc = std::source_location::current())
 {
-    std::println("{}:{}:{}: {}", loc.file_name(), loc.line(), loc.column(), s);
+    std::println("{}:{}:{}: [TODO]: {}", loc.file_name(), loc.line(), loc.column(), loc.function_name());
+    std::println("        {}", s);
+    std::exit(EXIT_FAILURE);
+}
+
+[[noreturn]]
+inline auto todo(std::source_location loc = std::source_location::current())
+{
+    todo("", loc);
     std::exit(EXIT_FAILURE);
 }
 
@@ -118,6 +96,49 @@ inline auto f(bool cond, std::format_string<Args...> fmt, Args &&...args) -> voi
 
 }
 
+// Trying to follow semver
+namespace cl::vrsn {
+
+constexpr inline int major = 0;
+constexpr inline int minor = 0;
+constexpr inline int patch = 0;
+
+namespace detail {
+
+    consteval std::array<char, 16> make_version()
+    {
+        std::array<char, 16> buf{};
+        int pos = 0;
+
+        auto append_int = [&](int v)
+        {
+            char tmp[10]{};
+            int n = 0;
+
+            do {
+                tmp[n++] = char('0' + (v % 10));
+                v /= 10;
+            } while (v);
+
+            while (n--) buf[pos++] = tmp[n];
+        };
+
+        append_int(major);
+        buf[pos++] = '.';
+        append_int(minor);
+        buf[pos++] = '.';
+        append_int(patch);
+        buf[pos] = '\0';
+
+        return buf;
+    }
+
+    constexpr auto storage = detail::make_version();
+} // namespace detail
+constexpr const char* val = detail::storage.data();
+consteval const char* get() { return val; }
+} // namespace cl::vrsn
+
 namespace cl {
 // -----------------------------------------------------------------------------
 // UTILITIES & CONCEPTS
@@ -165,6 +186,16 @@ concept Validator_C = requires(const V& v, const T& val) {
 // MEMORY MANAGEMENT
 // -----------------------------------------------------------------------------
 
+namespace detail
+{
+template <typename T>
+struct get_inner_type { using type = T; };
+
+// Specialization for vector to extract inner type
+template <typename T, typename A>
+struct get_inner_type<std::vector<T, A>> { using type = T; };
+}
+
 class Arena
 {
     struct Block
@@ -179,8 +210,8 @@ class Arena
 
 public:
 
-template<typename... Args>
-constexpr auto deflt(Args... values)
+    template<typename... Args>
+    constexpr auto deflt(Args... values)
     {
         return [=]<typename Opt>(Opt &o) constexpr
         {
@@ -191,10 +222,10 @@ constexpr auto deflt(Args... values)
             o.default_val_ = T{static_cast<typename T::value_type>(values)...};
             o.has_default_ = true;
         };
-}
+    }
 
-    explicit Arena(std::size_t block_size = 64 * 1024) : block_size_(block_size) { 
-        cl::debug::l3("Arena: Initializing with block size {}", block_size);
+    explicit Arena(std::size_t block_size = 64 * 1024) : block_size_(block_size)
+    {
         add_block();
     }
 
@@ -203,7 +234,6 @@ constexpr auto deflt(Args... values)
 
     ~Arena()
     {
-        cl::debug::l2("Arena: Destructing. Objects: {}, Blocks: {}", destructors_.size(), blocks_.size());
         for (auto it = destructors_.rbegin(); it != destructors_.rend(); ++it) (*it)();
         for (auto& b : blocks_) ::operator delete(b.data);
     }
@@ -216,7 +246,6 @@ constexpr auto deflt(Args... values)
 
         if (p + n > b.end)
         {
-            cl::debug::l3("Arena: Block full. Allocating new block for request of {} bytes", n);
             add_block(std::max(block_size_, n + align));
             return alloc(n, align); 
         }
@@ -232,9 +261,9 @@ constexpr auto deflt(Args... values)
         void* mem = alloc(sizeof(T), alignof(T));
         T* obj = ::new (mem) T(std::forward<Args>(args)...);
 
-        if constexpr (!std::is_trivially_destructible_v<T>) {
+        if constexpr (!std::is_trivially_destructible_v<T>)
             destructors_.push_back([obj]() { obj->~T(); });
-        }
+
         return obj;
     }
 
@@ -357,9 +386,16 @@ struct Opt
     std::source_location loc{};
 };
 
+struct Name_config
+{
+    std::string_view short_name;
+    std::string_view long_name;
+    std::source_location loc;
+};
+
 constexpr auto name(std::string_view s, std::string_view l, std::source_location loc = std::source_location::current())
 {
-    return [s, l, loc]<typename Opt>(Opt& o) constexpr { o.args[0] = s; o.args[1] = l; o.loc = loc; };
+    return Name_config{s, l, loc};
 }
 
 constexpr auto desc(std::string_view sv)
@@ -399,7 +435,8 @@ constexpr auto array(List_type t = List_type::Consecutive, std::string_view d = 
     return [t, d]<typename Opt>(Opt &o) constexpr
     {
         static_assert(is_std_array_v<typename Opt::value_type>, "Array configuration can only be done on arrays");
-        o.multi_cfg = {t, d};
+        o.list_cfg.type = t;
+        o.list_cfg.delimiter = d;
     };
 }
 
@@ -508,7 +545,7 @@ consteval Storage_kind type_to_storage_kind()
 template<Opt_type T> struct _opt_type_to_canonical_type_t_ {};
 template<> struct _opt_type_to_canonical_type_t_<Opt_type::Int>   { using value = long long; };
 template<> struct _opt_type_to_canonical_type_t_<Opt_type::Bool>  { using value = bool; };
-template<> struct _opt_type_to_canonical_type_t_<Opt_type::Str>   { using value = std::string; }; 
+template<> struct _opt_type_to_canonical_type_t_<Opt_type::Str>   { using value = std::string; };
 template<> struct _opt_type_to_canonical_type_t_<Opt_type::Float> { using value = double; };
 
 // -----------------------------------------------------------------------------
@@ -558,15 +595,15 @@ struct Parse_err
 {
     struct err
     {
-        std::string message;
-        std::string_view option_name;
+        std::string option{};
+        std::string message{};
     };
     std::vector<err> errors{};
 
     template <typename... Args>
-    auto push_err(const std::string& option, std::format_string<Args...> fmt, Args &&...args)
+    auto push_err(const std::string& option, std::format_string<Args...> fmt, Args &&...a)
     {
-        return this->errors.push_back({option, std::format(fmt, std::forward<Args>(args)...)});
+        this->errors.push_back({option, std::format(fmt, std::forward<Args>(a)...)});
     }
 
     template <typename... Args>
@@ -574,21 +611,22 @@ struct Parse_err
     {
         return this->push_err(std::string(option), fmt, std::forward<Args>(args)...);
     }
+private:
 };
 
 using Runtime_value = std::variant<
-std::string, long long, bool, double,
-std::vector<std::string>,
-std::vector<long long>,
-std::vector<bool>,
-std::vector<double>,
-std::monostate
+    cl::Text, cl::Num, cl::Flag, cl::Fp_Num,
+    std::vector<cl::Text>,
+    std::vector<cl::Num>,
+    std::vector<cl::Flag>,
+    std::vector<cl::Fp_Num>,
+    std::monostate
 >;
 
 struct Runtime
 {
     Runtime_value runtime_value{std::monostate()};
-    bool seen{false};
+    bool parsed{false};
     std::size_t count{0};
 
     Runtime& operator=(const Runtime & r) = default;
@@ -616,6 +654,13 @@ struct Parse_res
     }
 };
 
+// Inside cl.hpp, after Parse_err definition or outside namespace cl
+inline std::ostream& operator<<(std::ostream& os, const cl::Parse_err& err) {
+    for (const auto& e : err.errors) {
+        os << "Error in option '" << e.option << "': " << e.message << "\n";
+    }
+    return os;
+}
 // -----------------------------------------------------------------------------
 // PARSER
 // -----------------------------------------------------------------------------
@@ -642,9 +687,45 @@ public:
         std::function<std::expected<void, std::string>(const Runtime_value&)> validate;
     };
     std::vector<std::string> truthy_strs = { "y", "true", "yes", "t" };
-    std::vector<std::string> falsy_strs  = { "n", "false", "no", "f" };
+    std::vector<std::string> falsy_strs =  { "n", "false", "no", "f" };
 
 private:
+    struct Parse_ctx
+    {
+        Arg_stream & args;
+        Parse_res& res;
+        Parse_err& err;
+        const Parser_config &cfg;
+        bool stop_flags;
+        std::string_view curr_key{};
+
+        Parse_ctx( Arg_stream& a, Parse_err & e, Parse_res& r, Parser_config& c) : args(a), res(r), err(e), cfg(c), stop_flags(false) {}
+        Parse_ctx(const Parse_ctx & p) = delete;
+        Parse_ctx(const Parse_ctx && p) = delete;
+        Parse_ctx operator=(const Parse_ctx & p) = delete;
+        Parse_ctx operator=(const Parse_ctx && p) = delete;
+
+        // Helper to push errors easily
+        template <typename... Args>
+        void error(std::format_string<Args...> fmt, Args &&...a)
+        {
+            err.push_err(this->curr_key, fmt, std::forward<Args>(a)...);
+
+            while (!args.empty())
+            {
+                auto t = args.peek();
+                // Stop if we see something that looks like a flag
+                if (t)
+                {
+                    if (t->starts_with("--"))
+                        return;
+                    if (t->starts_with("-") && t->size() == 2 && std::isalpha((*t)[1]))
+                        return;
+                }
+                args.pop();
+            }
+        }
+    };
     static constexpr int sn_index = 0;
     static constexpr int ln_index = 1;
 
@@ -658,8 +739,6 @@ private:
     std::vector<Option *> options_;
     std::vector<Runtime> runtime_;
 
-    friend class std::formatter<Parser::Option>;
-
 public:
     Parser_config cfg_;
 
@@ -672,33 +751,15 @@ public:
         short_arg_to_id_.reserve(52); 
     }
 
+    void add_explicit_bool_strs(const std::vector<std::string> & truthy, const std::vector<std::string> & falsy);
+
     template<typename T, typename ...Configs>
     requires ((Configurer<Configs, T> && ...) && Parsable_Type_C<T>)
-    auto add(Configs&&... confs) -> Opt_id
-    {
-        Opt<T> opt;
-        (confs(opt), ...);
-        return this->add_impl(opt);
-    }
+    auto add(Name_config name_cfg, Configs&&... confs) -> Opt_id;
 
-    auto parse(int argc, char *argv[]) -> std::expected<Parse_res, std::string>;
+    auto parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse_err>;
+
     auto print_help(std::ostream& os = std::cout) -> void;
-
-    void synchronize(Arg_stream& args)
-    {
-        while (!args.empty())
-        {
-            auto t = args.peek();
-            // Stop if we see something that looks like a flag
-            if (t)
-            {
-                if (t->starts_with("--")) return;
-                if (t->starts_with("-") && t->size() == 2 && std::isalpha((*t)[1])) return;
-            }
-            args.pop();
-        }
-    }
-
 private:
 
     template <typename T>
@@ -717,428 +778,17 @@ private:
 
     template <typename Dest>
     requires Supported_Scalar_C<Dest>
-    static inline auto string_to_value(std::string_view s) -> std::expected<Dest, std::string>
-    {
-        if constexpr (std::is_same_v<Dest, std::string> || std::is_same_v<Dest, std::string_view>)
-        {
-            return std::string(s);
-        }
-        else if constexpr (std::is_same_v<Dest, bool>)
-        {
-            if (s == "true" || s == "1" || s == "on" || s == "yes" || s == "y") return true;
-            if (s == "false" || s == "0" || s == "off" || s == "no" || s == "n") return false;
-            cl::debug::l3("ParseValue: Failed bool conversion for '{}'", s);
-            return std::unexpected(std::format("Invalid boolean value: '{}'", s));
-        }
-        else if constexpr (std::is_integral_v<Dest>)
-        {
-            Dest v{};
-            auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
-            if (ec != std::errc{}) {
-                cl::debug::l3("ParseValue: Failed int conversion for '{}'", s);
-                return std::unexpected(std::format("Invalid integer: '{}'", s));
-            }
-            return v;
-        }
-        else if constexpr (std::is_floating_point_v<Dest>)
-        {
-            Dest v{};
-            auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
-            if (ec != std::errc{})
-            {
-                cl::debug::l3("ParseValue: Failed float conversion for '{}'", s);
-                return std::unexpected(std::format("Invalid float: '{}'", s));
-            }
-            return v;
-        }
-    }
+    auto string_to_value(std::string_view s) -> std::expected<Dest, std::string>;
 
-    auto assign_value_scalar(Runtime& _runtime, Parse_err & _err, Opt_type type, std::string_view s) -> std::expected<void, std::string>
-    {
-        _runtime.seen = true;
-        _runtime.count++;
-        switch (type)
-        {
-            case Opt_type::Bool:
-            {
-                if (auto typed_value = string_to_value<bool>(s); typed_value)
-                    _runtime.runtime_value = *typed_value;
-                else
-                    return std::unexpected(typed_value.error());
-
-                return {};
-            } break;
-            case Opt_type::Int:
-            {
-                if (auto typed_value = string_to_value<long long>(s); typed_value)
-                    _runtime.runtime_value = *typed_value;
-                else
-                    return std::unexpected(typed_value.error());
-
-                return {};
-            } break;
-            case Opt_type::Float:
-            {
-                if (auto typed_value = string_to_value<double>(s); typed_value)
-                    _runtime.runtime_value = *typed_value;
-                else
-                    return std::unexpected(typed_value.error());
-
-                return {};
-            } break;
-            case Opt_type::Str:
-            {
-                if (auto typed_value = string_to_value<std::string>(s); typed_value)
-                    _runtime.runtime_value = *typed_value;
-                else
-                    return std::unexpected(typed_value.error());
-
-                return {};
-            } break;
-            default: this->panic("Unreachable: Unknown type was detected.");
-        }
-        std::unreachable();
-    }
-
-    inline auto push_scalar(Runtime& _rt, Parse_err& _err, Option *opt, std::string_view sv) -> std::expected<void, std::string>
-    {
-        switch (opt->type) {
-            case Opt_type::Int: {
-                auto& vec = std::get<cl::List<cl::Num>>(_rt.runtime_value);
-                if (auto res = this->string_to_value<cl::Num>(sv); !res)
-                    return std::unexpected(res.error());
-                else
-                    vec.push_back(res.value());
-            }break;
-
-            case Opt_type::Float: {
-                auto& vec = std::get<cl::List<cl::Fp_Num>>(_rt.runtime_value);
-                if (auto res = this->string_to_value<cl::Fp_Num>(sv); !res)
-                    return std::unexpected(res.error());
-                else
-                    vec.push_back(*res);
-            }break; 
-
-            case Opt_type::Str: {
-                std::get<cl::List<cl::Text>>(_rt.runtime_value).push_back(std::string(sv));
-            }break; 
-
-            default: this->panic("Unreachable");
-        }
-        return {};
-    }
-
-    inline auto assign_vec(Runtime& _runtime, Parse_err& _err, Opt_type type, std::vector<std::string> s) -> std::expected<void, std::string>
-    {
-        _runtime.seen = true;
-        _runtime.count++;
-        switch (type)
-        {
-            case Opt_type::Int:
-            {
-                auto vec = std::get<std::vector<cl::Num>>(_runtime.runtime_value);
-                cl::asrt::t((vec.size() >= s.size()), "Vec size mismatch");
-                for ( int i = 0; i < s.size(); i++)
-                {
-                    if (auto typed_value = string_to_value<cl::Num>(s[i]); typed_value)
-                        vec[i] = *typed_value;
-                    else
-                        return std::unexpected(typed_value.error());
-                }
-                return {};
-            } break;
-            case Opt_type::Float:
-            {
-                auto vec = std::get<std::vector<cl::Fp_Num>>(_runtime.runtime_value);
-                cl::asrt::t((vec.size() == s.size()), "Vec size mismatch");
-                for ( int i = 0; i < s.size(); i++)
-                {
-                    if (auto typed_value = string_to_value<cl::Fp_Num>(s[i]); typed_value)
-                        vec[i] = *typed_value;
-                    else
-                        return std::unexpected(typed_value.error());
-                }
-                return {};
-            } break;
-            case Opt_type::Str:
-            {
-                auto vec = std::get<std::vector<cl::Text>>(_runtime.runtime_value);
-                cl::asrt::t((vec.size() == s.size()), "Vec size mismatch");
-                for ( int i = 0; i < s.size(); i++)
-                {
-                    if (auto typed_value = string_to_value<cl::Text>(s[i]); typed_value)
-                        vec[i] = *typed_value;
-                    else
-                        return std::unexpected(typed_value.error());
-                }
-                return {};
-            } break;
-            default: this->panic("Unreachable: Unknown type was detected.");
-        }
-        std::unreachable();
-    }
-
-    auto fill_delimited_arr(const std::string& delimiter, std::string_view s, const Option * opt, Runtime& rt, Parse_err& err) -> std::expected<void, std::string>
-    {
-        auto splitted = std::views::split(s, delimiter);
-
-        switch (opt->type)
-        {
-            case Opt_type::Int: {
-                std::size_t count = 0;
-                auto &res_vec = std::get<std::vector<cl::Num>>(rt.runtime_value);
-                auto &def_vec = std::get<std::vector<cl::Num>>(opt->default_value);
-                cl::asrt::t((res_vec.size() == opt->arity && res_vec.size() == def_vec.size()), "Vector size not same as arity, some library error.");
-                if (this->cfg_.allow_empty_arrays)
-                {
-                    if (opt->flags & (*Flags::O_Default))
-                        std::copy(def_vec.begin(), def_vec.end(), res_vec.begin());
-                    else
-                        std::fill(res_vec.begin(), res_vec.end(), cl::Num{});
-                }
-
-                for (auto &&part : splitted)
-                {
-                    std::string s = std::string(part.begin(), std::ranges::distance(part));
-                    if (s.empty())
-                    {
-                        if (this->cfg_.allow_empty_arrays)
-                            continue;
-                        else
-                            return std::unexpected("Empty elements in arrays now allowed");
-                    }
-                    if (auto ans = this->string_to_value<cl::Num>(s); ans)
-                        res_vec[count] = *ans;
-                    else
-                        return std::unexpected(ans.error());
-                    ++count;
-                }
-                if ((count < opt->arity - 1) && !this->cfg_.allow_empty_arrays) return std::unexpected("Empty elements in arrays now allowed");
-            } break;
-
-            case Opt_type::Float: {
-                std::size_t count = 0;
-                auto &res_vec = std::get<std::vector<cl::Fp_Num>>(rt.runtime_value);
-                auto &def_vec = std::get<std::vector<cl::Fp_Num>>(opt->default_value);
-                cl::asrt::t((res_vec.size() == opt->arity && res_vec.size() == def_vec.size()), "Vector size not same as arity, some library error.");
-
-                if (this->cfg_.allow_empty_arrays)
-                {
-                    if (opt->flags & (*Flags::O_Default))
-                        std::copy(def_vec.begin(), def_vec.end(), res_vec.begin());
-                    else
-                        std::fill(res_vec.begin(), res_vec.end(), cl::Fp_Num{});
-                }
-
-                for (auto &&part : splitted)
-                {
-                    std::string s = std::string(part.begin(), std::ranges::distance(part));
-                    if (s.empty())
-                    {
-                        if (this->cfg_.allow_empty_arrays)
-                            continue;
-                        else
-                            return std::unexpected("Empty elements in arrays now allowed");
-                    }
-                    if (auto ans = this->string_to_value<cl::Fp_Num>(s); ans)
-                        res_vec[count] = *ans;
-                    else
-                        return std::unexpected(ans.error());
-                    ++count;
-                }
-                if ((count < opt->arity - 1) && !this->cfg_.allow_empty_arrays) return std::unexpected("Empty elements in arrays now allowed");
-            } break;
-
-            case Opt_type::Str: {
-                std::size_t count = 0;
-                auto &res_vec = std::get<std::vector<cl::Text>>(rt.runtime_value);
-                auto &def_vec = std::get<std::vector<cl::Text>>(opt->default_value);
-                cl::asrt::t((res_vec.size() == opt->arity && res_vec.size() == def_vec.size()), "Vector size not same as arity, some library error.");
-
-                if (this->cfg_.allow_empty_arrays)
-                {
-                    if (opt->flags & (*Flags::O_Default))
-                        std::copy(def_vec.begin(), def_vec.end(), res_vec.begin());
-                    else
-                        std::fill(res_vec.begin(), res_vec.end(), cl::Text{});
-                }
-
-                for (auto &&part : splitted)
-                {
-                    std::string s = std::string(part.begin(), std::ranges::distance(part));
-                    res_vec[count] = s;
-                    ++count;
-                }
-                if ((count < opt->arity - 1) && !this->cfg_.allow_empty_arrays) return std::unexpected("Empty elements in arrays now allowed");
-            } break;
-            default: this->panic("Unreachable: unknown type of vector");
-        }
-        return {};
-    }
-
-    auto fill_arr_next(const Option * opt, Runtime& rt, Arg_stream & args, Parse_err& err) -> std::expected<void, std::string>
-    {
-
-        switch (opt->type) {
-            case Opt_type::Int: {
-                auto &res_vec = std::get<std::vector<cl::Num>>(rt.runtime_value);
-                auto &def_vec = std::get<std::vector<cl::Num>>(opt->default_value);
-                cl::asrt::t((res_vec.size() == opt->arity && res_vec.size() == def_vec.size()), "Vector size not same as arity, some library error.");
-                if (this->cfg_.allow_empty_arrays)
-                {
-                    if (opt->flags & (*Flags::O_Default))
-                        std::copy(def_vec.begin(), def_vec.end(), res_vec.begin());
-                    else
-                        std::fill(res_vec.begin(), res_vec.end(), cl::Num{});
-                }
-
-                std::size_t amount = opt->arity;
-                std::size_t ind  = 0;
-
-                std::string value;
-                while(!args.empty() && ind < amount)
-                {
-                    value = args.pop();
-                    if (value.empty())
-                    {
-                        if (this->cfg_.allow_empty_arrays)
-                            continue;
-                        else
-                            return std::unexpected("Empty elements in arrays now allowed");
-                    }
-                    if (auto ans = this->string_to_value<cl::Num>(value); ans)
-                        res_vec[ind] = *ans;
-                    else
-                        return std::unexpected(ans.error());
-                    ind++;
-                }
-                if ((ind < opt->arity - 1) && !this->cfg_.allow_empty_arrays) return std::unexpected("Empty elements in arrays now allowed");
-            } break;
-            case Opt_type::Float: {
-                auto &res_vec = std::get<std::vector<cl::Fp_Num>>(rt.runtime_value);
-                auto &def_vec = std::get<std::vector<cl::Fp_Num>>(opt->default_value);
-
-                cl::asrt::t((res_vec.size() == opt->arity && res_vec.size() == def_vec.size()), "Vector size not same as arity, some library error.");
-
-                if (this->cfg_.allow_empty_arrays)
-                {
-                    if (opt->flags & (*Flags::O_Default))
-                        std::copy(def_vec.begin(), def_vec.end(), res_vec.begin());
-                    else
-                        std::fill(res_vec.begin(), res_vec.end(), cl::Num{});
-                }
-
-                std::size_t amount = opt->arity;
-                std::size_t ind  = 0;
-
-                std::string value;
-                while(!args.empty() && ind < amount)
-                {
-                    value = args.pop();
-                    if (value.empty())
-                    {
-                        if (this->cfg_.allow_empty_arrays)
-                            continue;
-                        else
-                            return std::unexpected("Empty elements in arrays now allowed");
-                    }
-                    if (auto ans = this->string_to_value<cl::Fp_Num>(value); ans)
-                        res_vec[ind] = *ans;
-                    else
-                        return std::unexpected(ans.error());
-                    ind++;
-                }
-                if ((ind < opt->arity - 1) && !this->cfg_.allow_empty_arrays) return std::unexpected("Empty elements in arrays now allowed");
-            } break;
-
-            case Opt_type::Str: {
-                auto &res_vec = std::get<std::vector<cl::Text>>(rt.runtime_value);
-                auto &def_vec = std::get<std::vector<cl::Text>>(opt->default_value);
-
-                cl::asrt::t((res_vec.size() == opt->arity && res_vec.size() == def_vec.size()), "Vector size not same as arity, some library error.");
-
-                if (this->cfg_.allow_empty_arrays)
-                {
-                    if (opt->flags & (*Flags::O_Default))
-                        std::copy(def_vec.begin(), def_vec.end(), res_vec.begin());
-                    else
-                        std::fill(res_vec.begin(), res_vec.end(), cl::Num{});
-                }
-
-                std::size_t amount = opt->arity;
-                std::size_t ind  = 0;
-
-                std::string value;
-                while(!args.empty() && ind < amount)
-                {
-                    value = args.pop();
-                    res_vec[ind] = value;
-                    ind++;
-                }
-                if ((ind < opt->arity - 1) && !this->cfg_.allow_empty_arrays) return std::unexpected("Empty elements in arrays now allowed");
-            } break;
-            default: this->panic("Unreachable");
-        }
-        return {};
-    }
-
-
-    template<typename CanonElem, typename ValidatorVec>
-    static auto validate_storage(void* storage, Storage_kind kind, std::size_t arity, const ValidatorVec& validators) -> std::expected<void, std::string>
-    {
-        cl::debug::l3("ValidateStorage: Checking constraints for storage kind {}", static_cast<int>(kind));
-        if (validators.empty()) return {};
-
-        if (kind == Storage_kind::Array)
-        {
-            // Reconstruct array type for validation
-            auto* arr_ptr = static_cast<CanonElem*>(storage);
-            for (const auto& v : validators)
-            {
-                // Validator expects the full array, not individual elements
-                // This is tricky - we need to know the size at compile time
-                // For now, validate element by element
-                for (size_t i = 0; i < arity; ++i)
-                {
-                    auto r = (*v)(arr_ptr[i]);
-                    if (!r) return r;
-                }
-            }
-        }
-        else if (kind == Storage_kind::Vector)
-        {
-            auto* vec = static_cast<std::vector<CanonElem>*>(storage);
-            for (const auto& item : *vec)
-            {
-                for (const auto& v : validators)
-                {
-                    auto r = (*v)(item);
-                    if (!r) return r;
-                }
-            }
-        }
-        else // Scalar
-        {
-            auto* val = static_cast<CanonElem*>(storage);
-            for (const auto& v : validators)
-            {
-                auto r = (*v)(*val);
-                if (!r) return r;
-            }
-        }
-        return {};
-    }
-
-    auto handle_multi()
-    {
-    }
+    void handle_long_token(Parse_ctx& ctx, std::string_view body);
+    void handle_short_token(Parse_ctx& ctx, std::string_view body);
+    bool add_short_combined(Parse_ctx& ctx, std::string_view body);
+    bool acquire_value(Parse_ctx& ctx, Option* opt, std::optional<std::string_view> explicit_val);
+    void inject_value(Parse_ctx &ctx, Option *opt, std::span<const std::string_view> raw_values);
+    void assign_true(Runtime& rt);
 };
 
 } // namespace cl
-
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION: FORMATTERS (Global/std Scope)
-// -----------------------------------------------------------------------------
 
 template<>
 struct std::formatter<cl::Opt_type> : std::formatter<std::string_view>
@@ -1202,8 +852,8 @@ struct std::formatter<cl::Parse_err>
 
             out = std::format_to(out, "error: {}", e.message);
 
-            if (!e.option_name.empty())
-                out = std::format_to(out, "\n  option: {}", e.option_name);
+            if (!e.option.empty())
+                out = std::format_to(out, "\n      option: {}", e.option);
 
             if (i + 1 < pe.errors.size())
                 out = std::format_to(out, "\n");
@@ -1212,11 +862,10 @@ struct std::formatter<cl::Parse_err>
         return out;
     }
 };
-namespace cl {
 
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION: PARSER::ADD
-// -----------------------------------------------------------------------------
+#ifdef CL_IMPLEMENTATION
+#include <charconv>
+#include <ranges>
 
 template<typename T>
 constexpr std::string_view type_name()
@@ -1238,13 +887,30 @@ constexpr std::string_view type_name()
     #endif
 }
 
+void cl::Parser::add_explicit_bool_strs(const std::vector<std::string> &truthy, const std::vector<std::string> &falsy)
+{
+    truthy_strs = truthy;
+    falsy_strs = falsy;
+}
+
+template <typename T, typename... Configs>
+requires((cl::Configurer<Configs, T> && ...) && cl::Parsable_Type_C<T>)
+auto cl::Parser::add(Name_config name_cfg, Configs &&...confs) -> Opt_id
+{
+    Opt<T> opt;
+    opt.args[0] = name_cfg.short_name;
+    opt.args[1] = name_cfg.long_name;
+    opt.loc = name_cfg.loc;
+    if (opt.args[0].empty() && opt.args[1].empty())
+        panic("Option must have at least one name (short or long)");
+    (confs(opt), ...);
+    return this->add_impl(opt);
+}
+
 template <typename T>
 requires cl::Parsable_Type_C<T>
 inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
 {
-    cl::debug::l1("Add: Registering Option [long='{}', short='{}']", opt.args[0], opt.args[1]);
-
-    if (opt.args[0].empty() && opt.args[1].empty()) panic("Option must have at least one name (short or long)");
 
     auto is_valid_name = [](std::string_view name)
     {
@@ -1261,7 +927,6 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         cl::asrt::t((name.size() > 1), "Long option '{}' must be > 1 char", name);
         if (long_arg_to_id_.contains(name)) panic("Duplicate option: --{}", name);
         long_arg_to_id_.emplace(name, id);
-        cl::debug::l2("Mapped long name '--{}' to ID {}", name, id);
     }
 
     if (!opt.args[this->sn_index].empty())
@@ -1271,7 +936,6 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         cl::asrt::t((std::isalpha(name[0])), "Short option '{}' must be a letter or alphabet.", name);
         if (short_arg_to_id_.contains(name)) panic("Duplicate option: -{}", name);
         short_arg_to_id_.emplace(name, id);
-        cl::debug::l2("Mapped short name '-{}' to ID {}", name, id);
     }
     if (opt.flags & *Flags::O_Env)
     {
@@ -1289,7 +953,6 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     constexpr Opt_type target_enum = parsable_to_opt_type<T>();
     using CanonElem = typename _opt_type_to_canonical_type_t_<target_enum>::value;
 
-    cl::debug::l2("Type Analysis: UserT={}, CanonicalT={}, OptType={}", type_name<T>(), type_name<CanonElem>(), target_enum);
 
     // Check flags
     bool is_multi = opt.flags & *Flags::O_Multi;
@@ -1321,25 +984,21 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         }
         storage_kind = Storage_kind::Vector;
     }
-    cl::debug::l2("Config: Arity={}, Storage={}, Flags=0b{:b}", arity, storage_kind, opt.flags);
 
     Runtime_value val;
 
     if (storage_kind == Storage_kind::Vector)
     {
-        cl::debug::l3("Storage: Allocating std::vector<{}>", typeid(CanonElem).name());
         val = std::vector<CanonElem>{};
     }
     else if constexpr (is_std_array_v<T>)
     {
         constexpr size_t N = std::tuple_size_v<T>;
-        cl::debug::l3("Storage: Allocating std::array<{}, {}>", typeid(CanonElem).name(), N);
         std::vector<CanonElem> temp_vec(N, {});
         val = std::move(temp_vec);
     }
     else
     {
-        cl::debug::l3("Storage: Allocating Scalar {}", typeid(CanonElem).name());
         val = CanonElem{};
     }
 
@@ -1363,6 +1022,17 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         .default_value = val
     });
 
+    if (opt.flags & (*Flags::O_Default))
+    {
+        if constexpr (is_std_array_v<T>) {
+            std::vector<CanonElem> val;
+            for (auto & a : opt.default_val)
+                val.push_back(a);
+            o->default_value = val;
+        } else {
+            o->default_value = opt.default_val;
+        }
+    }
     std::function<std::expected<void, std::string>(const Runtime_value &)> val_fn;
 
     if (opt.validators_.empty())
@@ -1456,466 +1126,370 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
 // IMPLEMENTATION: PARSER::PARSE
 // -----------------------------------------------------------------------------
 
-// TODO: Make this thing totally totally cleaner.
-auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, std::string>
+auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse_err>
 {
-    cl::debug::l1("Parse {}: Start (argc={})",this->name_, argc);
     Arg_stream args(argc, argv);
-    bool stop_parsing = false;
     Parse_err err{};
     Parse_res res{};
-
-    bool is_next_binding_allowed = (this->cfg_.value_binding == Binding_type::Next) || (this->cfg_.value_binding == Binding_type::Both);
-
+    Parse_ctx ctx(args, err, res, this->cfg_);
     res.runtime_.resize(this->runtime_.size());
     std::copy(this->runtime_.begin(), this->runtime_.end(), res.runtime_.begin());
 
-    // WARN: Serious lifetime issues here.
-    auto to_sv = [](auto &&r) { return std::string(&*r.begin(), std::ranges::distance(r)); };
-    // 1. Tokenization Loop
     while (!args.empty())
     {
-        auto opt_tok = args.pop();
-
-        std::string_view tok = opt_tok;
-        cl::debug::l2("ParseLoop: Processing Token '{}'", tok);
-
-        if (stop_parsing)
-        {
-            cl::debug::l3("Storing as positional (stop_parsing=true)");
-            cl::debug::todo("Positionals after stop parsing.");
-            //positional_args_.push_back(tok);
-            continue;
-        }
-
-        if (tok == "--" && cfg_.stop_on_double_dash)
-        {
-            cl::debug::l2("Found '--', stopping option parsing");
-            stop_parsing = true;
-            continue;
-        }
-
-        // --- Long Option ---
+        std::string_view tok = args.pop();;
         if (tok.starts_with("--"))
-        {
-            std::string_view body = tok.substr(2);
-            std::string_view key = body;
-            std::string_view value;
-            bool has_eq = false;
-
-            if (auto eq = body.find('='); eq != std::string_view::npos)
-            {
-                cl::debug::l2("Body has '='");
-                if (this->cfg_.value_binding == Binding_type::Next)
-                {
-                    err.push_err(body, "Equals syntax not allowed");
-                }
-                cl::debug::l3("Value binding with equals alowed");
-                key = body.substr(0, eq);
-                value = body.substr(eq + 1);
-                has_eq = true;
-                cl::debug::l2("key: {}, value: {}", key, value);
-            }
-
-            if (!long_arg_to_id_.contains(key))
-            {
-                err.push_err(std::string(key), "{}", "Unknown option");
-            }
-            auto id = long_arg_to_id_[key];
-            auto *opt = options_[id];
-            auto &rt = res.runtime_[id];
-
-            cl::debug::l2("Matched Long Option: --{} (ID: {}), (Option: {})", key, id, *opt);
-
-            if (opt->arity == 0)
-            {
-                if (res.runtime_[opt->id].seen) continue;
-
-                if (has_eq) err.push_err(body, "A flag can't have a value bounded to it using '='");
-                cl::debug::l3("opt->arity = 0");
-                // TODO: Write a function to do this bs.
-                rt.runtime_value = true;
-                rt.seen = true;
-                rt.count++;
-                //std::println("Set flag: --{}", body);
-                cl::debug::l2("Set flag as true");
-                continue;
-            }
-
-            if (opt->arity == 1)
-            {
-                cl::debug::l3("opt->arity = 1");
-
-                if (!has_eq)
-                {
-                    cl::debug::l3("Doesnt have equals");
-                    if (!is_next_binding_allowed) std::unexpected("Bind value using '='.");
-                    if (args.empty()) return std::unexpected(std::format("No value provided for flag --{}", body));
-                    value = args.pop();
-                }
-                cl::debug::l3("Final value: {}", value);
-
-                if (opt->flags & *Flags::O_Multi)
-                {
-                    cl::debug::l2("Option type: Multi");
-                    switch (opt->multi_cfg.type) {
-                        case Multi_type::Repeat: {
-                            cl::debug::l2("Multi type: Repeat");
-                            if (auto value_injection_res = this->push_scalar(rt, err, opt, value); !value_injection_res)
-                                return std::unexpected(value_injection_res.error());
-                        } break;
-
-                        case Multi_type::Delimited: {
-                            cl::debug::l2("Multi type: Delimited");
-
-                            auto splitted = std::views::split(value, opt->multi_cfg.delimiter);
-                            cl::debug::l2("Splitted value with delimiter: {} : {}", opt->multi_cfg.delimiter, splitted);
-
-                            for (auto && s : splitted)
-                            {
-                                // TODO: Use 's'
-                                std::string str = std::string(s.begin(), std::ranges::distance(s));
-                                if (auto value_injection_res = this->assign_value_scalar(rt, err, opt->type, str); !value_injection_res)
-                                    return std::unexpected(value_injection_res.error());
-                            }
-                        } break;
-                        default: this->panic("Unreacheble point.");
-                    }
-                    continue;
-                }
-                else
-                {
-                    if (!has_eq)
-                    {
-                        cl::debug::l3("Doesn't have equals");
-                        if (!is_next_binding_allowed) std::unexpected("Bind value using '='.");
-                        if (args.empty()) return std::unexpected(std::format("No value provided for flag --{}", body));
-                        value = args.pop();
-                    }
-                    cl::debug::l2("Final value: {}", value);
-
-                    switch (this->cfg_.repeated_scalar) {
-
-                        case Repeated_scalar_policy::REJECT: {
-
-                            if (rt.seen) return std::unexpected("Value already assigned.");
-                            if (auto value_injection_res = this->assign_value_scalar(rt, err, opt->type, value); !value_injection_res)
-                                return std::unexpected(value_injection_res.error());
-
-                        } break;
-
-                        case Repeated_scalar_policy::FIRST: {
-
-                            if (rt.seen) continue;
-                            if (auto value_injection_res = this->assign_value_scalar(rt, err, opt->type, value); !value_injection_res)
-                                return std::unexpected(value_injection_res.error());
-
-                        } break;
-
-                        case Repeated_scalar_policy::LAST: {
-
-                            if (auto value_injection_res = this->assign_value_scalar(rt, err, opt->type, value); !value_injection_res)
-                                return std::unexpected(value_injection_res.error());
-
-                        } break;
-
-                        default: this->panic("Unreacheble point.");
-                    }
-                }
-            }
-
-            if (opt->arity > 1)
-            {
-                cl::debug::l2("Arity > 1: {}", opt->arity);
-                if (has_eq)
-                {
-                    cl::debug::l2("Has equals");
-                    if (opt->list_cfg.type == List_type::Consecutive) std::unexpected("");
-
-                    if (auto res = this->fill_delimited_arr(opt->list_cfg.delimiter, value, opt, rt, err); !res) return std::unexpected(res.error());
-
-                    rt.seen = true;
-                    rt.count++;
-                    continue;
-                }
-                else
-                {
-                    if (opt->list_cfg.type == List_type::Consecutive)
-                    {
-                        cl::debug::l2("List type: Consecutive.");
-                        if (auto fill_res = this->fill_arr_next(opt, rt, args, err); !fill_res )
-                            return std::unexpected(fill_res.error());
-
-                        rt.count++;
-                        rt.seen = true;
-                        continue;
-                    }
-                    else
-                    {
-                        cl::debug::l2("List type: Delimited.");
-                        value = args.pop();
-
-                        if (auto res = this->fill_delimited_arr(opt->list_cfg.delimiter, value, opt, rt, err); !res) return std::unexpected(res.error());
-
-                        rt.seen = true;
-                        rt.count++;
-                        continue;
-                    }
-                }
-            }
-            continue;
-        }
-
-        if (tok.starts_with("-") && tok.size() > 1)
-        {
-            cl::debug::l1("Small token: {} starting with '-'", tok);
-
-            // We have a single flag: something like -v
-            if (tok.size() == 2)
-            {
-                std::string_view flag_body = tok.substr(1);
-                cl::debug::l2("Token size: 2: body: {}", flag_body);
-                // Get option and runtime
-                Option* opt{};
-
-                if (auto it = this->short_arg_to_id_.find(flag_body); it == this->short_arg_to_id_.end())
-                    return std::unexpected(std::format("The option: -{} doesn't exist.", flag_body));
-                else
-                    opt = this->options_[it->second];
-
-                Runtime& rt = res.runtime_[opt->id];
-
-                cl::debug::l3("Found corresponding option:  {}", *opt);
-
-                if(opt->arity == 0)
-                {
-                    cl::debug::l2("Arity: 0: marking true.");
-                    rt.runtime_value = true;
-                }
-
-                if(opt->arity == 1)
-                {
-                    cl::debug::l2("Arity = 1");
-                    if (opt->flags & *Flags::O_Multi)
-                    {
-                        cl::debug::l2("Multi flag");
-                        switch (opt->multi_cfg.type) {
-
-                            case Multi_type::Repeat: {
-                                cl::debug::l2("Multi type: Repeat.");
-                                // WARN: This may cause a serious bug; the size thing because empty string might be given too.
-                                if (auto val = args.pop(); val.size())
-                                {
-                                    if (auto injection_res = this->push_scalar(rt, err, opt, val); !injection_res)
-                                        return std::unexpected(injection_res.error());
-                                }
-                                return std::unexpected(std::format("No value provided for option: {}", flag_body));
-                            } break;
-
-                            case Multi_type::Delimited: {
-                                if (auto val = args.pop(); val.size())
-                                {
-                                    for (auto &&_v : std::views::split(val, opt->multi_cfg.delimiter))
-                                    {
-                                        auto v = std::string_view{_v.begin(), _v.end()};
-                                        if (auto injection_res = this->push_scalar(rt, err, opt, v); !injection_res)
-                                            return std::unexpected(injection_res.error());
-                                    }
-                                }
-                            } break;
-                            default: this->panic( "Code reached unreachable point.");
-                        }
-                        continue;
-                    }
-                    else
-                    {
-                        switch (this->cfg_.repeated_scalar) {
-                            // TODO: Make if(!seen) condition outside to avoid too much branching inside
-                            case Repeated_scalar_policy::REJECT: {
-                                if (rt.seen) return std::unexpected(std::format("scalar option: {} specified twice, it is not allowed", flag_body));
-                                if (auto val = args.pop(); val.size())
-                                {
-                                    if (auto injection_res = this->assign_value_scalar(rt, err, opt->type, val); !injection_res)
-                                        return std::unexpected(injection_res.error());
-                                }
-                            } break;
-                            case Repeated_scalar_policy::FIRST: {
-                                if (rt.seen) continue;
-                                if (auto val = args.pop(); val.size())
-                                {
-                                    if (auto injection_res = this->assign_value_scalar(rt, err, opt->type, val); !injection_res)
-                                        return std::unexpected(injection_res.error());
-                                }
-                            }continue; break;
-                            case Repeated_scalar_policy::LAST: {
-                                if (auto val = args.pop(); val.size())
-                                {
-                                    if (auto injection_res = this->assign_value_scalar(rt, err, opt->type, val); !injection_res)
-                                        return std::unexpected(injection_res.error());
-                                }
-                            } break;
-                            default: this->panic("Code reached unreachable point.");
-                        }
-                        rt.seen = true;
-                        rt.count++;
-                        continue;
-                    }
-                }
-                if (opt->arity > 1)
-                {
-                    if (opt->list_cfg.type == List_type::Consecutive)
-                    {
-                        if (auto injection_res = this->fill_arr_next(opt, rt, args, err); !injection_res)
-                            std::unexpected(injection_res.error());
-                    }
-                    else
-                    {
-                        std::string_view value_str{};
-                        if ((value_str.empty() && (!this->cfg_.allow_empty_arrays))) return std::unexpected("Not enough elements provided for array.");
-                        value_str = args.pop();
-                        if (auto injection_res = this->fill_delimited_arr(opt->list_cfg.delimiter, value_str, opt, rt, err); !injection_res)
-                            return std::unexpected(injection_res.error());
-                    }
-                    continue;
-                }
-            }
-            else
-            {
-                std::string_view first_flag = tok.substr(1, 1);
-                Option * opt{};
-
-                if (auto it = this->short_arg_to_id_.find(first_flag); it != this->short_arg_to_id_.end())
-                    opt = this->options_[it->second];
-                else
-                    return std::unexpected(std::format("No such flag as: -{}", first_flag));
-
-                Runtime& rt = res.runtime_[opt->id];
-
-                if (opt->arity == 0)
-                {
-                    cl::debug::l2("Arity of first one: 0");
-                    if (!this->cfg_.allow_combined_short_flags) return std::unexpected("Combining short flags is not allowed");
-                    for (size_t i = 1; i < tok.size(); ++i)
-                    {
-                        std::string_view key{&tok[i], 1};
-
-                        auto it = short_arg_to_id_.find(key);
-                        if (it == short_arg_to_id_.end())
-                            return std::unexpected(std::format("No such flag as: -{}", tok[i]));
-
-                        Option *opt = options_[it->second];
-                        if (opt->arity != 0)
-                            return std::unexpected(std::format("Arity of flag: -{} is not 0 thus it can't be concatenated.", key));
-
-                        rt.runtime_value = true;
-                    }
-                    rt.seen = true;
-                    rt.count++;
-                    continue;
-                }
-                else if (opt->arity == 1)
-                {
-                    if (!this->cfg_.allow_short_value_concat) return std::unexpected("Concatenated short values not allowed");
-
-                    std::string_view value_str{};
-
-                    // TODO: Decide on how to handle the case when user enters '-x='.
-                    // Though this wont crash in that case too, it will only crash if I put value > 3
-                    if (this->cfg_.value_binding == Binding_type::Equal && tok[2] == '=')
-                        value_str = tok.substr(3);
-                    else
-                        value_str = tok.substr(2);
-
-                    if (opt->flags & *Flags::O_Multi)
-                    {
-                        switch (opt->multi_cfg.type) {
-                            case Multi_type::Repeat: {
-                                if (auto injection_res = this->push_scalar(rt, err, opt, value_str); !injection_res)
-                                    return std::unexpected(injection_res.error());
-                            } break;
-                            case Multi_type::Delimited: {
-                                // TODO: Handle this case in the add function.
-                                for (auto &&_v : std::views::split(value_str, opt->multi_cfg.delimiter))
-                                {
-                                    auto v = std::string_view{_v.begin(), _v.end()};
-                                    if (auto injection_res = this->push_scalar(rt, err, opt, v); !injection_res)
-                                        return std::unexpected(injection_res.error());
-                                }
-                            } break;
-                            default: this->panic("Code reached unreachable point.");
-                        }
-                        rt.seen = true;
-                        rt.count++;
-                        continue;
-                    }
-                    else
-                    {
-                        switch (this->cfg_.repeated_scalar) {
-                            case Repeated_scalar_policy::REJECT: {
-                                if (rt.seen) return std::unexpected(std::format("scalar option: {} specified twice, it is not allowed", first_flag));
-                                if (auto injection_res = this->assign_value_scalar(rt, err, opt->type, value_str); !injection_res)
-                                    return std::unexpected(injection_res.error());
-                            } break;
-                            case Repeated_scalar_policy::FIRST: {
-                                if (rt.seen) continue;
-                                if (auto injection_res = this->assign_value_scalar(rt, err, opt->type, value_str); !injection_res)
-                                    return std::unexpected(injection_res.error());
-                            }break;
-                            case Repeated_scalar_policy::LAST: {
-                                if (auto injection_res = this->assign_value_scalar(rt, err, opt->type, value_str); !injection_res)
-                                    return std::unexpected(injection_res.error());
-                            } break;
-                            default: this->panic("Unreachable");
-                        }
-                        rt.seen = true;
-                        rt.count++;
-                        continue;
-                    }
-                }
-                // Only allowed way to enter a value here is: "-a1,2,3", "-a=1,2,3"
-                std::string_view value_str{};
-                // TODO: Decide on how to handle the case when user enters '-x='.
-                // Though this wont crash in that case too, it will only crash if I put value > 3
-                if (this->cfg_.value_binding == Binding_type::Equal && tok[2] == '=')
-                    value_str = tok.substr(3);
-                else
-                    value_str = tok.substr(2);
-                if (rt.seen) return std::unexpected(std::format("Flag: -{} can't appear twice.", first_flag));
-
-                // TODO: Handle all configuration errors before parsing starts.
-                auto splitted = std::views::split(value_str, opt->list_cfg.delimiter);
-
-                auto to_sv = [](auto &&r) { return std::string_view(&*r.begin(), std::ranges::distance(r)); };
-
-                if (auto injection_res = this->fill_delimited_arr(opt->list_cfg.delimiter, value_str, opt, rt, err); !injection_res)
-                    return std::unexpected(injection_res.error());
-
-                rt.seen = true;
-                rt.count++;
-                continue;
-            }
-        }
-
-        cl::debug::l3("Storing as positional: '{}'", tok);
-        //positional_args_.push_back(tok);
+            this->handle_long_token(ctx, tok.substr(2));
+        else if (tok.starts_with("-"))
+            this->handle_short_token(ctx, tok.substr(1));
     }
+
+    if (!err.errors.empty()) return std::unexpected(err);
 
     res.opt_info_.resize(this->options_.size());
 
     for (auto i{0uz}; i < this->options_.size(); i++)
     {
-        res.opt_info_[i].type = this->options_[i]->type;
-        res.opt_info_[i].arity = this->options_[i]->arity;
-        res.opt_info_[i].storage = this->options_[i]->storage;
+        Option * opt = this->options_[i];
+        res.opt_info_[i].type    = opt->type;
+        res.opt_info_[i].arity   = opt->arity;
+        res.opt_info_[i].storage = opt->storage;
+
+        if (res.runtime_[i].parsed) continue;
+
+        if ((opt->flags & (*Flags::O_Default)))
+            res.runtime_[i].runtime_value = opt->default_value;
     }
 
-    cl::debug::l1("Parse: Success");
     return res;
 }
 
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION: PRINT HELP
-// -----------------------------------------------------------------------------
+template <typename Dest>
+requires cl::Supported_Scalar_C<Dest>
+inline auto cl::Parser::string_to_value(std::string_view s) -> std::expected<Dest, std::string>
+{
+    if constexpr (std::is_same_v<Dest, std::string> || std::is_same_v<Dest, std::string_view>)
+    {
+        return std::string(s);
+    }
+    else if constexpr (std::is_same_v<Dest, bool>)
+    {
+        for (auto &t : truthy_strs)
+            if (s == t)
+                return true;
+        for (auto &f : falsy_strs)
+            if (s == f)
+                return false;
+
+        return std::unexpected(std::format("Invalid boolean value: '{}'", s));
+    }
+    else if constexpr (std::is_integral_v<Dest>)
+    {
+        Dest v{};
+        auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+        if (ec != std::errc{})
+            return std::unexpected(std::format("Invalid integer: '{}'", s));
+        return v;
+    }
+    else if constexpr (std::is_floating_point_v<Dest>)
+    {
+        Dest v{};
+        auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+        if (ec != std::errc{})
+            return std::unexpected(std::format("Invalid float: '{}'", s));
+        return v;
+    }
+}
+
+void cl::Parser::handle_long_token(Parse_ctx &ctx, std::string_view body)
+{
+    std::string_view key = body;
+    std::optional<std::string_view> explicit_val = std::nullopt;
+    ctx.curr_key = body;
+
+    if (size_t eq_pos = body.find('='); eq_pos != std::string_view::npos)
+    {
+        if (this->cfg_.value_binding == Binding_type::Next)
+            return ctx.error("Equals '=' binding is disabled by configuration.");
+        key = body.substr(0, eq_pos);
+        ctx.curr_key = key;
+        explicit_val = body.substr(eq_pos + 1);
+    }
+
+    auto it = long_arg_to_id_.find(key);
+    if (it == long_arg_to_id_.end())
+        return ctx.error("Unknown option");
+
+    acquire_value(ctx, options_[it->second], explicit_val);
+}
+
+void cl::Parser::handle_short_token(Parse_ctx &ctx, std::string_view body)
+{
+    if (body.empty())
+        return;
+    std::string_view key = body.substr(0, 1);
+    ctx.curr_key = key;
+
+    auto it = short_arg_to_id_.find(key);
+    if (it == short_arg_to_id_.end())
+        return ctx.error("Unknown flag -{}", key);
+
+    Option *opt = options_[it->second];
+
+    if (opt->arity == 0)
+    {
+        this->assign_true(ctx.res.runtime_[opt->id]);
+        // If characters remain, handle them recursively
+        if (body.size() > 1)
+        {
+            if (!ctx.cfg.allow_combined_short_flags)
+                return ctx.error("Combined short flags are disabled.");
+
+            this->add_short_combined(ctx, body.substr(1));
+        }
+        return;
+    }
+
+    std::optional<std::string_view> attached_val = std::nullopt;
+
+    if (body.size() > 1)
+    {
+        // Check if user is trying to attach a value
+        if (!ctx.cfg.allow_short_value_concat)
+            return ctx.error("Concatenated values disabled.");
+
+        // Handle edge case: -j=4 vs -j4
+        // Only strip '=' if the binding config allows it (Equal or Both)
+        if (body[1] == '=' && ctx.cfg.value_binding != Binding_type::Next)
+            attached_val = body.substr(2);  // Skip flag and '='
+        else
+            attached_val = body.substr(1);  // Skip just the flag, rest is value
+    }
+
+    // Delegate to value acquisition (handles parsing/storage)
+    acquire_value(ctx, opt, attached_val);
+}
+
+bool cl::Parser::add_short_combined(Parse_ctx &ctx, std::string_view body)
+{
+    for (auto x : body)
+    {
+        std::string_view curr_key{&x, 1};
+        auto it = short_arg_to_id_.find(curr_key);
+        ctx.curr_key = curr_key;
+        if (it == short_arg_to_id_.end())
+        {
+            ctx.error("Unknown flag");
+            return false;
+        }
+        Option *curr_opt = this->options_[it->second];
+
+        if (curr_opt->arity > 0)
+        {
+            ctx.error("airty greater than zero, therefore can't be concatenated");
+            return false;
+        }
+
+        this->assign_true(ctx.res.runtime_[curr_opt->id]);
+    }
+    return true;
+}
+
+bool cl::Parser::acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::string_view> explicit_val)
+{
+    auto &rt = ctx.res.runtime_[opt->id];
+
+    if (rt.parsed && !(opt->flags & *Flags::O_Multi) && (opt->arity == 1))
+    {
+        switch (this->cfg_.repeated_scalar)
+        {
+            case cl::Repeated_scalar_policy::REJECT:
+            {
+                return false;
+            }
+            break;
+            case Repeated_scalar_policy::FIRST:
+            {
+                return true;
+            }
+            break;
+            case cl::Repeated_scalar_policy::LAST:
+                break;
+        }
+    }
+
+    if (opt->arity == 0)
+    {
+        if (explicit_val)
+        {
+            ctx.error("Flag '{}' cannot accept a value.", opt->names[0]);
+            return false;
+        }
+        this->assign_true(rt);
+        return true;
+    }
+
+    std::vector<std::string_view> raw_inputs{};
+    if (explicit_val)
+    {
+        if ((opt->arity > 1) && (opt->list_cfg.type == List_type::Consecutive))
+        {
+            ctx.error("Consecutive arrays cannot use attached values.");
+            return false;
+        }
+        // List type can only be Delimited now.
+        // Split the input
+        if (opt->arity > 1 || ((opt->flags & (*Flags::O_Multi)) && (opt->multi_cfg.type == Multi_type::Delimited)))
+        {
+            std::string_view delim = (opt->arity > 1) ? opt->list_cfg.delimiter : opt->multi_cfg.delimiter;
+
+            for (auto &&part : std::views::split(*explicit_val, delim)) raw_inputs.emplace_back(std::string_view(part));
+        }
+        else
+        {
+            // Not array, not multi delimited
+            // Only options: Scalar/Multi repeat
+            raw_inputs.push_back(*explicit_val);
+        }
+    }
+    else
+    {
+        // Fetch values from a stream.
+        if (this->cfg_.value_binding != Binding_type::Next && this->cfg_.value_binding != Binding_type::Both)
+        {
+            ctx.error("No value for option, use '<key>='<value>'' to bind value");
+            return false;
+        }
+
+        if (opt->arity > 1 && opt->list_cfg.type == List_type::Consecutive)
+        {
+            // Fetch N items
+            for (size_t i{}; i < opt->arity; ++i)
+            {
+                if (ctx.args.empty())
+                {
+                    ctx.error("Not enough arguments for array.");
+                    return false;
+                }
+                raw_inputs.push_back(ctx.args.pop());
+            }
+        }
+        else
+        {
+            // Fetch 1 item (might be delimited string)
+            if (ctx.args.empty())
+            {
+                ctx.error("Value not provided.");
+                return false;
+            }
+            std::string_view val = ctx.args.pop();
+
+            // Check for delimiter splitting again
+            bool split_needed = (opt->arity > 1 && opt->list_cfg.type == List_type::Delimited) ||
+                                ((opt->flags & *Flags::O_Multi) && opt->multi_cfg.type == Multi_type::Delimited);
+
+            if (split_needed)
+            {
+                std::string_view delim = (opt->arity > 1) ? opt->list_cfg.delimiter : opt->multi_cfg.delimiter;
+                for (auto &&part : std::views::split(val, delim)) raw_inputs.emplace_back(std::string_view(part));
+            }
+            else
+            {
+                // Either scalar or multi repeat
+                raw_inputs.push_back(val);
+            }
+        }
+    }
+    this->inject_value(ctx, opt, raw_inputs);
+    return true;
+}
+
+void cl::Parser::inject_value(Parse_ctx &ctx, Option *opt, std::span<const std::string_view> raw_values)
+{
+    auto &rt = ctx.res.runtime_[opt->id];
+
+    // Ensure error reporting knows context (optional, but safe)
+    ctx.curr_key = opt->names[0];
+    bool result = false;
+
+    std::visit(
+        [&](auto &&storage)
+        {
+            using StorageT = std::decay_t<decltype(storage)>;
+
+            // 1. Skip Monostate
+            if constexpr (std::is_same_v<StorageT, std::monostate>)
+                return;
+            else
+            {
+                // 2. Safe Type Extraction
+                using ElemT = typename cl::detail::get_inner_type<StorageT>::type;
+
+                // 3. Process Values
+                for (size_t i = 0; i < raw_values.size(); ++i)
+                {
+                    // Convert string to value
+                    auto val_res = this->string_to_value<ElemT>(raw_values[i]);
+
+                    if (!val_res)
+                    {
+                        ctx.error("{}", val_res.error());
+                        return;
+                    }
+
+                    // 4. Storage Logic (Guarded by if constexpr)
+                    if constexpr (is_std_vector_v<StorageT>)
+                    {
+                        // VECTOR / ARRAY LOGIC
+                        bool is_fixed_array = (opt->storage == Storage_kind::Array);
+
+                        if (is_fixed_array)
+                        {
+                            // Validate Array Size safely here
+                            if (i >= storage.size())
+                            {
+                                if (!ctx.cfg.allow_empty_arrays)
+                                    ctx.error("Internal Error: Target array size {} too small for input index {}.", storage.size(), i);
+                                return;
+                            }
+                            storage[i] = *val_res;
+                        }
+                        else
+                        {
+                            storage.push_back(*val_res);
+                            result = true;
+                        }
+                    }
+                    else
+                    {
+                        // SCALAR LOGIC (int, bool, etc.)
+                        storage = *val_res;
+                        result = true;
+                    }
+                }
+            }
+        },
+        rt.runtime_value);
+
+    if (result)
+    {
+        if (auto valid = opt->validate(rt.runtime_value); !valid)
+        {
+            ctx.error("Validation failed: {}", valid.error());
+            return;
+        }
+    }
+
+    rt.parsed = true;
+    rt.count++;
+}
+
+void cl::Parser::assign_true(Runtime& rt)
+{
+    rt.runtime_value = true;
+    rt.count++;
+    rt.parsed = true;
+}
 
 auto cl::Parser::print_help(std::ostream &os) -> void
 {
@@ -1976,6 +1550,6 @@ auto cl::Parser::print_help(std::ostream &os) -> void
     //os << "\n";
 }
 
-} // namespace cl
+#endif // !CL_IMPLEMENTATION
 
 #endif // !__CL_HPP_
