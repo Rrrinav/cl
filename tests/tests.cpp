@@ -490,6 +490,134 @@ void test_arrays()
     }
 }
 
+void test_get()
+{
+    cl::Parser p;
+    auto i = p.add<cl::Num>(cl::name("i", "Int"));
+    Args a = { "prg", "-i5" };
+    auto res = p.parse(a.argc(), a.ptr());
+    
+    test_name("get -> bool");
+    cl::Text ans;
+    if (res)
+    {
+        assert(!res->get(i, ans));
+        passed();
+    }
+    failed();
+}
+
+void test_subcommand_logic()
+{
+    std::cout << "\n\t **** Checking Subcommands\n" << std::endl;
+    cl::Parser p;
+
+    // 1. Setup Global Flags
+    auto verbose = p.add<cl::Flag>(cl::name("v", "verbose"), cl::desc("Global verbose flag"));
+
+    // 2. Setup Subcommand: 'commit'
+    auto cmd_commit = p.add_sub_cmd("commit", "Commit changes", 0);
+    auto msg = p.add<cl::Text>(
+        cl::name("m", "message"), 
+        cl::desc("Commit message"), 
+        cl::sub_cmd(cmd_commit),
+        cl::required()  // Required ONLY if 'commit' is used
+    );
+
+    // 3. Setup Subcommand: 'push'
+    auto cmd_push = p.add_sub_cmd("push", "Push changes", 0);
+    auto force = p.add<cl::Flag>(
+        cl::name("f", "force"), 
+        cl::desc("Force push"), 
+        cl::sub_cmd(cmd_push)
+    );
+
+    // ---------------------------------------------------------
+    test_name("Subcommand: Context Switch (commit)");
+    Args a1 = {"prog", "commit", "-m", "fix bug", "-v"};
+    auto res = p.parse(a1.argc(), a1.ptr());
+
+    if (res.has_value())
+    {
+        assert(res->get<cl::Text>(msg) == "fix bug");
+        assert(res->get<cl::Flag>(verbose) == true);
+        passed();
+    }
+    else
+    {
+        failed(); std::cout << res.error() << std::endl;
+    }
+
+    // ---------------------------------------------------------
+    test_name("Subcommand: Context Switch (push)");
+    // Context switches to 'push', allows -f. 'msg' is NOT required here.
+    Args a2 = {"prog", "push", "--force"};
+    res = p.parse(a2.argc(), a2.ptr());
+
+    if (res.has_value())
+    {
+        assert(res->get<cl::Flag>(force) == true);
+        
+        // Ensure we can't access 'msg' (it wasn't parsed)
+        cl::Text s;
+        assert(!res->get(msg, s)); 
+        passed();
+    }
+    else
+    {
+        failed(); std::cout << res.error() << std::endl;
+    }
+
+    // ---------------------------------------------------------
+    test_name("Subcommand: Invalid Scope (Cross-talk)");
+    // Using a 'push' flag (-f) inside 'commit' command
+    Args a3 = {"prog", "commit", "-m", "wip", "-f"};
+    res = p.parse(a3.argc(), a3.ptr());
+
+    if (!res.has_value())
+    {
+        // Expected Failure: Flag '-f' is not valid in current context
+        passed();
+        std::cout << res.error();
+    }
+    else
+    {
+        failed(); std::cout << "Expected failure for invalid scope, got success." << std::endl;
+    }
+
+    // ---------------------------------------------------------
+    test_name("Subcommand: Missing Required in Context");
+    // 'commit' requires -m
+    Args a4 = {"prog", "commit"};
+    res = p.parse(a4.argc(), a4.ptr());
+
+    if (!res.has_value())
+    {
+        // Expected Failure: Required option missing
+        passed();
+    }
+    else
+    {
+        failed(); std::cout << "Expected failure for missing required, got success." << std::endl;
+    }
+
+    // ---------------------------------------------------------
+    test_name("Global Context (Requirement Ignored)");
+    // Required flag -m (from commit) should NOT trigger error here because we aren't in 'commit' mode.
+    Args a5 = {"prog", "-v"};
+    res = p.parse(a5.argc(), a5.ptr());
+
+    if (res.has_value())
+    {
+        assert(res->get<cl::Flag>(verbose) == true);
+        passed();
+    }
+    else
+    {
+        failed(); std::cout << res.error() << std::endl;
+    }
+}
+
 void test_short()
 {
     std::cout << "\n\t **** Checking Shorts\n" << std::endl;
@@ -507,6 +635,7 @@ int main()
         test_validator();
         test_arrays();
         test_positionals();
+        test_subcommand_logic();
         std::cout << "\nAll tests passed successfully!\n";
     }
     catch (const std::exception &e)

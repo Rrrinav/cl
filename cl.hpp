@@ -147,6 +147,9 @@ using Num    = long long;
 using Fp_Num = double;
 using Text   = std::string;
 using Flag   = bool;
+using Opt_id = uint32_t;
+using Subcommand_id = uint32_t;
+inline constexpr Subcommand_id global_command = 0;
 
 template<typename T>
 concept Supported_Scalar_C = std::is_same_v<T, bool> || std::is_same_v<T, cl::Num>|| std::is_same_v<T, cl::Fp_Num> || std::is_same_v<T, std::string> || std::is_same_v<T, std::string_view>;
@@ -338,12 +341,13 @@ enum class Binding_type : uint8_t { Equal, Next, Both };
 
 enum class Flags : uint16_t
 {
-    O_Multi    = 1,
-    O_Required = 1 << 1,
-    O_Hidden   = 1 << 2,
-    O_Env      = 1 << 3,
-    O_Default  = 1 << 4,
-    O_Explicit_Bool = 1 << 5
+    Multi    = 1,
+    Required = 1 << 1,
+    Hidden   = 1 << 2,
+    Env      = 1 << 3,
+    Default  = 1 << 4,
+    Explicit_Bool = 1 << 5,
+    Exclusive     = 1 << 6
 };
 constexpr auto operator*(Flags f) -> const uint16_t { return static_cast<uint16_t>(f); }
 constexpr Flags operator|(Flags a, Flags b)    noexcept { return static_cast<Flags>(std::to_underlying(a) | std::to_underlying(b)); }
@@ -377,6 +381,7 @@ struct Opt
     uint16_t flags = 0;
     List_cfg list_cfg { List_type::Consecutive, ","};
     Multi_cfg multi_cfg { Multi_type::Repeat, "," };
+    Subcommand_id sub_cmd_id{global_command};
     struct ValidatorEntry
     {
         std::function<std::expected<void, std::string>(const T&)> func;
@@ -399,6 +404,15 @@ struct Single_name_cfg
     std::source_location loc;
 };
 
+struct Subcommand
+{
+    Subcommand_id id;
+    std::string_view name;
+    std::string_view description;
+    uint16_t flags;
+    std::vector<Opt_id> members; 
+};
+
 constexpr auto name(std::string_view l, std::source_location loc = std::source_location::current())
 {
     return Single_name_cfg{l, loc};
@@ -416,7 +430,7 @@ constexpr auto desc(std::string_view sv)
 
 constexpr auto required()
 {
-    return []<typename Opt>(Opt& o) constexpr { o.flags |= *Flags::O_Required; };
+    return []<typename Opt>(Opt& o) constexpr { o.flags |= *Flags::Required; };
 }
 
 constexpr auto explicit_bool()
@@ -424,7 +438,7 @@ constexpr auto explicit_bool()
     return []<typename Opt>(Opt &o) constexpr
     {
         static_assert(std::is_same_v<typename Opt::value_type, bool>, "Non bools/flags can't have be explicit bools");
-        o.flags |= *Flags::O_Explicit_Bool;
+        o.flags |= *Flags::Explicit_Bool;
     };
 }
 
@@ -436,7 +450,7 @@ constexpr auto multi(Multi_type type = Multi_type::Repeat, std::string_view d = 
         static_assert(!is_std_array_v<typename Opt::value_type>, "Fixed-size arrays cannot be multi-value. Use vector.");
         o.multi_cfg.type = type;
         o.multi_cfg.delimiter = d;
-        o.flags |= *Flags::O_Multi;
+        o.flags |= *Flags::Multi;
     };
 }
 
@@ -454,7 +468,7 @@ constexpr auto array(List_type t = List_type::Consecutive, std::string_view d = 
 template<typename T>
 constexpr auto deflt(T&& val)
 {
-    return [val = std::forward<T>(val)]<typename Opt>(Opt& o) constexpr { o.default_val = std::move(val); o.flags |= *Flags::O_Default; };
+    return [val = std::forward<T>(val)]<typename Opt>(Opt& o) constexpr { o.default_val = std::move(val); o.flags |= *Flags::Default; };
 }
 
 template<typename T>
@@ -473,7 +487,7 @@ constexpr auto deflt(Args... values)
         constexpr std::size_t N = std::tuple_size_v<T>;
         static_assert(sizeof...(Args) == N, "Number of default values must match array size");
         o.default_val = T{static_cast<typename T::value_type>(values)...};
-        o.flags |= *Flags::O_Default;
+        o.flags |= *Flags::Default;
     };
 }
 
@@ -495,7 +509,7 @@ constexpr auto validators(Vs &&...vals)
 
 constexpr auto env(std::string_view e)
 {
-    return [e]<typename Opt>(Opt& o) constexpr { o.flags |= (*Flags::O_Env); o.env_ = e; };
+    return [e]<typename Opt>(Opt& o) constexpr { o.flags |= (*Flags::Env); o.env_ = e; };
 }
 
 constexpr auto meta(std::string_view m)
@@ -503,12 +517,16 @@ constexpr auto meta(std::string_view m)
     return [m]<typename Opt>(Opt& o) constexpr { o.meta_ = m; };
 }
 
+constexpr auto sub_cmd(Subcommand_id id)
+{
+    return [id]<typename Opt>(Opt &o) constexpr { o.sub_cmd_id = id; };
+}
+
 template<typename Config, typename T>
 concept Configurer = requires(Config&& c, Opt<T>& opt) {
     { std::forward<Config>(c)(opt) } -> std::convertible_to<void>;
 };
 
-using Opt_id = uint32_t;
 enum Opt_type : uint8_t { Int, Bool, Str, Float };
 enum Storage_kind : uint8_t { Scalar, Array, Vector };
 
@@ -657,58 +675,66 @@ struct Parse_res
     std::vector<Option_info> opt_info_;
 
     template <typename T>
+    requires Gettable_Type_C<T>
     [[nodiscard]]
     auto get(Opt_id id) const -> T
     {
-        // Safety check for ID bounds
         if (id >= runtime_.size())
-        {
-            // In a real library, you might throw a specific exception or panic
-            std::println(stderr, "[CL Error] Invalid Option ID accessed: {}", id);
             std::exit(EXIT_FAILURE);
-        }
-
         const auto &val_variant = runtime_[id].runtime_value;
-
-        // CASE 1: User wants std::array (Fixed List)
-        // We stored it as std::vector in the variant, so we must convert it.
         if constexpr (is_std_array_v<T>)
         {
             using InnerT = typename T::value_type;
-
-            // Ensure the variant actually holds a vector of the correct inner type
-            if (!std::holds_alternative<std::vector<InnerT>>(val_variant))
-            {
-                std::println(stderr, "[CL Error] Type Mismatch: Option ID {} is not stored as a vector (cannot convert to array).", id);
-                std::exit(EXIT_FAILURE);
-            }
-
             const auto &vec = std::get<std::vector<InnerT>>(val_variant);
-
-            // Runtime size check (The parser logic should have ensured this, but safe is better)
-            if (vec.size() != std::tuple_size_v<T>)
-            {
-                std::println(stderr, "[CL Error] Array size mismatch for ID {}. Expected {}, got {}.", id, std::tuple_size_v<T>, vec.size());
-                std::exit(EXIT_FAILURE);
-            }
-
             T arr_result;
             std::copy(vec.begin(), vec.end(), arr_result.begin());
             return arr_result;
         }
-        // CASE 2: User wants exactly what is stored (int, float, string, vector<...>)
         else
         {
-            // std::get will throw std::bad_variant_access if T doesn't match the active member.
-            // You can wrap this try-catch if you want cleaner error messages.
+            return std::get<T>(val_variant);
+        }
+    }
+
+    template <typename T>
+    requires Gettable_Type_C<T>
+    [[nodiscard]]
+    auto get(Opt_id id, T &val) const -> std::expected<void, std::string>
+    {
+        if (id >= runtime_.size())
+            return std::unexpected(std::format("[CL Error] Invalid Option ID: {}", id));
+
+        const auto &rt = runtime_[id];
+        const auto &info = opt_info_[id];
+
+        bool is_vector = (info.storage == Storage_kind::Vector);
+        if (!rt.parsed && !is_vector)
+            return std::unexpected("Option not set");
+
+        const auto &val_variant = rt.runtime_value;
+        if constexpr (is_std_array_v<std::decay_t<T>>)
+        {
+            using InnerT = typename T::value_type;
+            if (!std::holds_alternative<std::vector<InnerT>>(val_variant))
+                return std::unexpected("Type Mismatch");
+            const auto &vec = std::get<std::vector<InnerT>>(val_variant);
+            if (vec.size() != std::tuple_size_v<T>)
+                return std::unexpected("Array size mismatch");
+            T arr_result;
+            std::copy(vec.begin(), vec.end(), arr_result.begin());
+            val = std::move(arr_result);
+            return {};
+        }
+        else
+        {
             try
             {
-                return std::get<T>(val_variant);
+                val = std::get<std::decay_t<T>>(val_variant);
+                return {};
             }
             catch (const std::bad_variant_access &)
             {
-                std::println(stderr, "[CL Error] Type Mismatch for ID {}. Requested {}, but variant holds index {}.", id, typeid(T).name(), val_variant.index());
-                std::exit(EXIT_FAILURE);
+                return std::unexpected("Type Mismatch");
             }
         }
     }
@@ -740,6 +766,7 @@ public:
         std::vector<std::string_view> validator_helps;
         std::string_view default_hints;
         Runtime_value default_value;
+        Subcommand_id sub_id;
 
         std::function<std::expected<void, std::string>(const Runtime_value&)> validate;
     };
@@ -756,6 +783,7 @@ private:
         bool stop_flags;
         std::string_view curr_key{};
         std::size_t positional_ind{0};
+        Subcommand_id active_sub_id{global_command};
 
         Parse_ctx( Arg_stream& a, Parse_err & e, Parse_res& r, Parser_config& c) : args(a), res(r), err(e), cfg(c), stop_flags(false) {}
         Parse_ctx(const Parse_ctx & p) = delete;
@@ -796,6 +824,8 @@ private:
     std::unordered_map<std::string_view, Opt_id> short_arg_to_id_;
     std::vector<Option *> options_;
     std::vector<Runtime> runtime_;
+    std::vector<Subcommand*> sub_cmds_;
+    std::unordered_map<std::string_view, Subcommand_id> sub_cmd_name_map_;
 
 public:
     Parser_config cfg_;
@@ -808,6 +838,70 @@ public:
     requires ((Configurer<Configs, T> && ...) && Parsable_Type_C<T>)
     auto add(Name_config name_cfg, Configs&&... confs) -> Opt_id;
 
+    inline auto add_sub_cmd(const std::string& name, const std::string& desc, uint16_t flags) -> Subcommand_id
+    {
+        // 1. Validation
+        auto _name = arena_.str(name);
+
+        if (sub_cmd_name_map_.contains(name))
+            panic("Duplicate subcommand name: '{}'", name);
+
+        cl::asrt::t(!name.empty(), "Subcommand name cannot be empty.");
+
+        // 2. ID Assignment
+        // Assuming 0 is reserved for the "Default/Global" group if you have one
+        Subcommand_id id = static_cast<Subcommand_id>(sub_cmds_.size());
+
+        // 3. Allocation
+        Subcommand *g = arena_.make<Subcommand>(Subcommand{
+            .id = id,
+            .name = name,
+            .description = arena_.str(desc),
+            .flags = flags,
+            .members = {}  // Empty initially, filled by register_to_group
+        });
+
+        // 4. Registration
+        sub_cmds_.push_back(g);
+        sub_cmd_name_map_.emplace(name, id);
+
+        return id;
+    }
+
+    void validate_subcommand_logic() const 
+    {
+        for (const auto &g : sub_cmds_)
+        {
+            if (g->flags & *Flags::Required)
+            {
+                bool guaranteed_data = false;
+                for (auto oid : g->members)
+                {
+                    Option *o = options_[oid];
+                    if ((o->flags & *Flags::Required) || (o->flags & *Flags::Default))
+                    {
+                        guaranteed_data = true;
+                        break;
+                    }
+                }
+                if (!guaranteed_data)
+                {
+                    panic(
+                        "Subcommand '{}' is Required but contains no Required options and no Defaults.\n"
+                        "Logic Error: A required subcommand implies data MUST be produced...",
+                    g->name);
+                }
+            }
+        }
+    }
+    inline auto get_sub_cmd_id(std::string_view name) const -> std::optional<Subcommand_id>
+    {
+        auto it = sub_cmd_name_map_.find(name);
+        if (it != sub_cmd_name_map_.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
     auto parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse_err>;
 
     auto print_help(std::ostream& os = std::cout) -> void;
@@ -843,6 +937,15 @@ private:
     void inject_value(Parse_ctx &ctx, Option *opt, std::span<const std::string_view> raw_values);
     void assign_true(Runtime& rt);
     void handle_positional(Parse_ctx &ctx, std::string_view value);
+
+    inline void register_to_subcommand(Opt_id opt_id, Subcommand_id target_sub_id)
+    {
+        if (static_cast<size_t>(target_sub_id) >= sub_cmds_.size() + 1)
+            panic("Attempted to register option to invalid Subcommand ID: {}", target_sub_id);
+
+        Subcommand *g = sub_cmds_[static_cast<size_t>(target_sub_id)];
+        g->members.push_back(opt_id);
+    }
 
 private:
     std::vector<Opt_id> positional_ids_;
@@ -955,6 +1058,7 @@ cl::Parser::Parser(std::string s, std::string des, std::size_t reserve)
     runtime_.reserve(reserve);
     long_arg_to_id_.reserve(reserve);
     short_arg_to_id_.reserve(52); 
+    this->add_sub_cmd("GLOBAL", "Global Context", 0);
 }
 
 template <typename... Args>
@@ -989,104 +1093,217 @@ template <typename T>
 requires cl::Parsable_Type_C<T>
 inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
 {
-
-    auto is_valid_name = [](std::string_view name)
+    // ==================================================================================
+    // 1. Helper Lambdas (Name & Env Validation)
+    // ==================================================================================
+    auto validate_long_name = [&](std::string_view name)
     {
-        return (std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '-' || c == '_'; }) && (!name.starts_with("-")));
+        bool valid_chars = std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '-' || c == '_'; });
+        cl::asrt::t(
+            valid_chars && !name.starts_with("-"), "Long option '{}' invalid. Must be alphanumeric/_/-, cannot start with '-'.", name);
+        cl::asrt::t(name.size() > 1, "Long option '{}' must be > 1 char.", name);
+        if (long_arg_to_id_.contains(name))
+            panic("Duplicate option: --{}", name);
     };
 
+    auto validate_short_name = [&](std::string_view name)
+    {
+        cl::asrt::t(name.size() == 1, "Short option '{}' must be 1 char.", name);
+        cl::asrt::t(std::isalpha(name[0]), "Short option '{}' must be a letter.", name);
+        if (short_arg_to_id_.contains(name))
+            panic("Duplicate option: -{}", name);
+    };
+
+    auto validate_env_name = [&](std::string_view name)
+    {
+        if (name.empty() || std::isdigit(name[0]))
+            return false;
+        return std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '_'; });
+    };
+
+    // ==================================================================================
+    // 2. Type Analysis & Storage Configuration
+    // ==================================================================================
+    constexpr Opt_type target_enum = parsable_to_opt_type<T>();
+    using CanonElem = typename _opt_type_to_canonical_type_t_<target_enum>::value;
+
+    const bool is_multi = opt.flags & *Flags::Multi;
+
+    // Safety Checks
+    cl::asrt::t(!(is_std_array_v<T> && is_multi), "Arrays cannot be multi. Use vector (scalar + F_MULTI).");
+    if ((opt.flags & *Flags::Env) && (target_enum != Opt_type::Str || is_multi))
+        panic("Environment variable fallback only applies to scalar strings.");
+
+    // Determine Storage Kind and Arity
+    Storage_kind storage_kind = Storage_kind::Scalar;
+    std::size_t arity = 1;
+
+    if (is_multi)
+    {
+        storage_kind = Storage_kind::Vector;
+        if (opt.multi_cfg.type == Multi_type::Delimited && opt.multi_cfg.delimiter.empty())
+            panic("DELIMITED multi mode requires non-empty delimiter");
+    }
+    else if constexpr (is_std_array_v<T>)
+    {
+        storage_kind = Storage_kind::Array;
+        arity = std::tuple_size_v<T>;
+
+        if (opt.list_cfg.type == List_type::Consecutive && cfg_.value_binding == Binding_type::Equal)
+            panic("CONSECUTIVE arrays incompatible with Binding_type::Equal.");
+    }
+    else if constexpr (std::is_same_v<T, bool>)
+    {
+        if (!(opt.flags & *Flags::Explicit_Bool))
+            arity = 0;
+    }
+
+    // ==================================================================================
+    // 3. Register Names & Env
+    // ==================================================================================
     auto id = assign_id();
 
-    // 1. Register Names
     if (!opt.args[this->ln_index].empty())
     {
         auto name = arena_.str(opt.args[this->ln_index]);
-        cl::asrt::t(is_valid_name(name), "Long option '{}' contains invalid characters, can't sart with '-' and can only contain alphanum, '-' & '_'", name);
-        cl::asrt::t((name.size() > 1), "Long option '{}' must be > 1 char", name);
-        if (long_arg_to_id_.contains(name)) panic("Duplicate option: --{}", name);
+        validate_long_name(name);
         long_arg_to_id_.emplace(name, id);
     }
 
     if (!opt.args[this->sn_index].empty())
     {
         auto name = arena_.str(opt.args[this->sn_index]);
-        cl::asrt::t((name.size() == 1), "Short option '{}' must be 1 char", name);
-        cl::asrt::t((std::isalpha(name[0])), "Short option '{}' must be a letter or alphabet.", name);
-        if (short_arg_to_id_.contains(name)) panic("Duplicate option: -{}", name);
+        validate_short_name(name);
         short_arg_to_id_.emplace(name, id);
     }
-    // 2. Analyze Types & Determine Canonical Storage
-    constexpr Opt_type target_enum = parsable_to_opt_type<T>();
-    using CanonElem = typename _opt_type_to_canonical_type_t_<target_enum>::value;
 
+    if ((opt.flags & *Flags::Env) && !validate_env_name(opt.env_))
+        panic("Invalid environment variable name: '{}'", opt.env_);
 
-    // Check flags
-    bool is_multi = opt.flags & *Flags::O_Multi;
-    cl::asrt::t((!(is_std_array_v<T> && is_multi)), "Arrays cannot be multi. Use vector (scalar + F_MULTI).");
+    // ==================================================================================
+    // 4. Default Value Construction (FIXED LOGIC)
+    // ==================================================================================
+    Runtime_value default_rt_val;
+    std::string default_str_hint;
 
-    std::size_t arity = 1;
-    Storage_kind storage_kind = Storage_kind::Scalar;
-
-    if constexpr (is_std_array_v<T>)
+    // Helper to fill vector/array from a container or single value
+    auto make_vector_storage = [&](const auto &source)
     {
-        if (opt.list_cfg.type == List_type::Consecutive && cfg_.value_binding == Binding_type::Equal)
-                panic("CONSECUTIVE arrays incompatible with Binding_type::Equal. Use Next or Both.\n\t"
-                      "Even then, if you use both, this will break at runtime if you enter consecutive member array with Equal binding because Both contains Equal.");
-
-        arity = std::tuple_size_v<T>;
-        storage_kind = Storage_kind::Array;
-    }
-    else if constexpr (std::is_same_v<T, bool>)
-    {
-        if (!(opt.flags & *Flags::O_Explicit_Bool)) arity = 0;
-    }
-
-    if (is_multi)
-    {
-        if (opt.multi_cfg.type == Multi_type::Delimited)
+        std::vector<CanonElem> vec;
+        if constexpr (is_std_array_v<T>)
         {
-            if (opt.multi_cfg.delimiter.empty())
-                panic("DELIMITED multi mode requires non-empty delimiter");
+            vec.reserve(std::tuple_size_v<T>);
+            for (const auto &item : source) vec.push_back(static_cast<CanonElem>(item));
         }
-        storage_kind = Storage_kind::Vector;
-    }
+        else if constexpr (is_std_vector_v<T>)
+        {
+            for (const auto &item : source) vec.push_back(static_cast<CanonElem>(item));
+        }
+        else
+        {
+            // Multi-scalar
+            vec.push_back(static_cast<CanonElem>(source));
+        }
+        return vec;
+    };
 
-    Runtime_value val;
+    if (opt.flags & *Flags::Default)
+    {
+        default_str_hint = arena_.str(std::format("{}", opt.default_val));
 
-    if (storage_kind == Storage_kind::Vector)
-    {
-        val = std::vector<CanonElem>{};
-    }
-    else if constexpr (is_std_array_v<T>)
-    {
-        constexpr size_t N = std::tuple_size_v<T>;
-        std::vector<CanonElem> temp_vec(N, {});
-        val = std::move(temp_vec);
+        // FIX: Handle Array vs Scalar explicitly to avoid invalid static_cast on arrays
+        if (storage_kind == Storage_kind::Scalar)
+        {
+            if constexpr (!is_std_array_v<T> && !is_std_vector_v<T>)
+                default_rt_val = static_cast<CanonElem>(opt.default_val);
+            else
+                panic("Internal Error: Storage kind Scalar mismatch with Container Type.");
+        }
+        else
+        {
+            // Vector or Array storage
+            default_rt_val = make_vector_storage(opt.default_val);
+        }
     }
     else
     {
-        val = CanonElem{};
+        // Initialize Empty
+        if (storage_kind == Storage_kind::Scalar)
+            default_rt_val = CanonElem{};
+        else if (storage_kind == Storage_kind::Array)
+            default_rt_val = std::vector<CanonElem>(arity, CanonElem{});
+        else
+            default_rt_val = std::vector<CanonElem>{};
     }
 
-    if (opt.flags & *Flags::O_Env)
-    {
-        if (arity != 1 || target_enum != Opt_type::Str || (opt.flags & *Flags::O_Multi)) panic("Environment varialble fallback only applies to scalar strings.");
-        auto is_valid_env = [](std::string_view name)
-        {
-            if (name.empty() || std::isdigit(name[0]))
-                return false;
-            return std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '_'; });
-        };
-        if (!is_valid_env(opt.env_))
-            panic("Invalid environment variable name: '{}'", opt.env_);
-    }
-
-    // 4. Extract Validator Helps
+    // ==================================================================================
+    // 5. Validator Construction
+    // ==================================================================================
     std::vector<std::string_view> v_helps;
+    v_helps.reserve(opt.validators_.size());
     for (const auto &v : opt.validators_) v_helps.push_back(this->arena_.str(v.help));
 
-    Option *o = arena_.make<Option>(Option{
-        .id = id,
+    std::function<std::expected<void, std::string>(const Runtime_value &)> val_fn;
+
+    if (opt.validators_.empty())
+    {
+        val_fn = [](const auto &) -> std::expected<void, std::string> { return {}; };
+    }
+    else
+    {
+        val_fn = [entries = opt.validators_, storage_kind](const Runtime_value &rv) -> std::expected<void, std::string>
+        {
+            auto check_instance = [&](const T &instance) -> std::expected<void, std::string>
+            {
+                for (const auto &e : entries)
+                    if (auto r = e.func(instance); !r)
+                        return r;
+                return {};
+            };
+
+            if (storage_kind == Storage_kind::Vector || storage_kind == Storage_kind::Array)
+            {
+                const auto &raw_vec = std::get<std::vector<CanonElem>>(rv);
+
+                if constexpr (is_std_vector_v<T> || is_std_array_v<T>)
+                {
+                    T container;
+                    using ValType = typename T::value_type;
+
+                    if constexpr (is_std_vector_v<T>)
+                    {
+                        container.reserve(raw_vec.size());
+                        for (const auto &e : raw_vec) container.push_back(static_cast<ValType>(e));
+                    }
+                    else
+                    {
+                        for (size_t i = 0; i < raw_vec.size() && i < std::tuple_size_v<T>; ++i)
+                            container[i] = static_cast<ValType>(raw_vec[i]);
+                    }
+                    return check_instance(container);
+                }
+                else
+                {
+                    for (size_t i = 0; i < raw_vec.size(); ++i)
+                        if (auto r = check_instance(static_cast<T>(raw_vec[i])); !r)
+                            return std::unexpected(std::format("Item {}: {}", i, r.error()));
+                    return {};
+                }
+            }
+            else
+            {
+                if constexpr (!is_std_array_v<T>)
+                    return check_instance(static_cast<T>(std::get<CanonElem>(rv)));
+                return {};
+            }
+        };
+    }
+
+    // ==================================================================================
+    // 6. Object Registration (FIXED ORDER)
+    // ==================================================================================
+
+    Option *o = arena_.make<Option>(Option{.id = id,
         .names = {arena_.str(opt.args[0]), arena_.str(opt.args[1])},
         .desc = arena_.str(opt.desc),
         .type = target_enum,
@@ -1098,106 +1315,19 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         .meta = arena_.str(opt.meta_),
         .env = arena_.str(opt.env_),
         .validator_helps = v_helps,
-        .default_value = val
-    });
-
-    if (opt.flags & (*Flags::O_Default))
-    {
-        if constexpr (is_std_array_v<T>) {
-            std::vector<CanonElem> val;
-            for (auto & a : opt.default_val)
-                val.push_back(a);
-            o->default_value = val;
-        } else {
-            o->default_value = opt.default_val;
-        }
-    }
-    std::function<std::expected<void, std::string>(const Runtime_value &)> val_fn;
-
-    if (opt.validators_.empty())
-    {
-        val_fn = [](const auto &) -> std::expected<void, std::string> { return {}; };
-    }
-    else
-    {
-        // Capture the type-erased validator entries by value
-        val_fn = [entries = opt.validators_, kind = storage_kind](const Runtime_value &rv) -> std::expected<void, std::string>
-        {
-            auto check_one = [&](const T &val) -> std::expected<void, std::string>
-            {
-                for (const auto &e : entries)
-                    if (auto r = e.func(val); !r)
-                        return r;
-                return {};
-            };
-
-            // CASE 1: Container (Vector/Array)
-            if (kind == Storage_kind::Vector || kind == Storage_kind::Array)
-            {
-                const auto &raw_vec = std::get<std::vector<CanonElem>>(rv);
-
-                if constexpr (is_std_vector_v<T> || is_std_array_v<T>)
-                {
-                    T container;
-                    using ValType = typename T::value_type;
-                    if constexpr (is_std_vector_v<T>)
-                    {
-                        container.reserve(raw_vec.size());
-                        for (const auto &e : raw_vec) container.push_back(static_cast<ValType>(e));
-                    }
-                    else
-                    {
-                        // std::array reconstruction
-                        for (size_t i = 0; i < raw_vec.size() && i < std::tuple_size_v<T>; ++i)
-                            container[i] = static_cast<ValType>(raw_vec[i]);
-                    }
-                    return check_one(container);
-                }
-                else
-                {
-                    // Scalar Multi
-                    for (size_t i = 0; i < raw_vec.size(); ++i)
-                    {
-                        // static_cast on arrays is invalid, we reconstruct scalar here
-                        T user_val = static_cast<T>(raw_vec[i]);
-                        if (auto r = check_one(user_val); !r)
-                            return std::unexpected(std::format("Item {}: {}", i, r.error()));
-                    }
-                    return {};
-                }
-            }
-            // CASE 2: Scalar
-            else
-            {
-                if constexpr (!is_std_array_v<T>)
-                {
-                    const auto &canon_val = std::get<CanonElem>(rv);
-                    return check_one(static_cast<T>(canon_val));
-                }
-                return {};
-            }
-        };
-    }
-
-    // 4. Store Option
-    std::vector<std::string> helps;
-    for (auto &v : opt.validators_) helps.push_back(v.help);
-    o->validate = val_fn;
+        .default_hints = default_str_hint,
+        .default_value = default_rt_val,
+        .sub_id = opt.sub_cmd_id,
+        .validate = val_fn});
 
     Runtime rt{};
+    rt.runtime_value = default_rt_val;
 
-    if (o->flags & (*Flags::O_Default))
-        o->default_hints = arena_.str(std::format("{}", opt.default_val));
-
-    if (storage_kind == Storage_kind::Vector)
-        rt.runtime_value = std::vector<CanonElem>{};
-    else if (storage_kind == Storage_kind::Array)
-        rt.runtime_value = std::vector<CanonElem>(o->arity, CanonElem{});
-    else
-        rt.runtime_value = CanonElem{};
+    if (opt.sub_cmd_id != global_command) this->register_to_subcommand(id, opt.sub_cmd_id);
 
     options_.push_back(o);
     runtime_.push_back(rt);
+
     return id;
 }
 
@@ -1228,6 +1358,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
     if (!err.errors.empty()) return std::unexpected(err);
 
     res.opt_info_.resize(this->options_.size());
+
     for (size_t i = 0; i < this->options_.size(); ++i)
     {
         Option *opt = this->options_[i];
@@ -1235,7 +1366,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
         Parse_res::Option_info& opt_i = res.opt_info_[i];
 
         // 1. Try Environment Variable (If not parsed from CLI)
-        if (!rt.parsed && (opt->flags & *Flags::O_Env) && !opt->env.empty())
+        if (!rt.parsed && (opt->flags & *Flags::Env) && !opt->env.empty())
         {
             if (const char *env_val = std::getenv(opt->env.data()))
             {
@@ -1251,7 +1382,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
         }
 
         // 2. Apply Default (If still not parsed)
-        if (!rt.parsed && (opt->flags & *Flags::O_Default))
+        if (!rt.parsed && (opt->flags & *Flags::Default))
         {
             rt.runtime_value = opt->default_value;
             rt.parsed = true;
@@ -1259,10 +1390,13 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
         }
 
         // 3. Check Required (Final Check)
-        if (!rt.parsed && (opt->flags & *Flags::O_Required))
+        if (!rt.parsed && (opt->flags & *Flags::Required))
         {
-            // If it's required, but we haven't seen it in CLI, Env, or Defaults
-            err.push_err(opt->names[0], "Required option is missing.");
+            // NEW: Only enforce requirement if the option is Global OR belongs to the Active Subcommand
+            if (opt->sub_id == global_command || opt->sub_id == ctx.active_sub_id) 
+            {
+                err.push_err(opt->names[0], "Required option is missing.");
+            }
         }
 
         opt_i.type    = opt->type;
@@ -1271,9 +1405,31 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
 
         if (rt.parsed) continue;
 
-        if ((opt->flags & (*Flags::O_Default))) rt.runtime_value = opt->default_value;
+        if ((opt->flags & (*Flags::Default))) rt.runtime_value = opt->default_value;
     }
 
+    if (ctx.active_sub_id != global_command)
+    {
+        Subcommand* s = sub_cmds_[ctx.active_sub_id];
+        std::vector<std::string_view> set_members;
+
+        for (auto oid : s->members) {
+            if (res.runtime_[oid].parsed) {
+                Option* o = options_[oid];
+                set_members.push_back(!o->names[1].empty() ? o->names[1] : o->names[0]);
+            }
+        }
+
+        // Check Exclusive (Mutex)
+        if ((s->flags & *Flags::Exclusive) && set_members.size() > 1) {
+            err.push_err(std::string(""), "Mutually exclusive options in subcommand '{}' set simultaneously.", s->name);
+        }
+
+        // Check Required (At least one)
+        if ((s->flags & *Flags::Required) && set_members.empty()) {
+            err.push_err(std::string(""), "Subcommand '{}' requires at least one option to be set.", s->name);
+        }
+    }
     if (!err.errors.empty()) return std::unexpected(err);
     else return res;
 }
@@ -1334,7 +1490,12 @@ void cl::Parser::handle_long_token(Parse_ctx &ctx, std::string_view body)
     if (it == long_arg_to_id_.end())
         return ctx.error("Unknown option");
 
-    acquire_value(ctx, options_[it->second], explicit_val);
+    Option *opt = options_[it->second];
+
+    if (opt->sub_id != global_command && opt->sub_id != ctx.active_sub_id) 
+        return ctx.error("Option '--{}' is not valid in the current context.", key);
+
+    acquire_value(ctx, opt, explicit_val);
 }
 
 void cl::Parser::handle_short_token(Parse_ctx &ctx, std::string_view body)
@@ -1349,6 +1510,9 @@ void cl::Parser::handle_short_token(Parse_ctx &ctx, std::string_view body)
         return ctx.error("Unknown flag -{}", key);
 
     Option *opt = options_[it->second];
+
+    if (opt->sub_id != global_command && opt->sub_id != ctx.active_sub_id)
+        return ctx.error("Flag '-{}' is not valid in the current context.", key);
 
     if (opt->arity == 0)
     {
@@ -1413,7 +1577,7 @@ bool cl::Parser::acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::s
 {
     auto &rt = ctx.res.runtime_[opt->id];
 
-    if (rt.parsed && !(opt->flags & *Flags::O_Multi) && (opt->arity == 1))
+    if (rt.parsed && !(opt->flags & *Flags::Multi) && (opt->arity == 1))
     {
         switch (this->cfg_.repeated_scalar)
         {
@@ -1453,7 +1617,7 @@ bool cl::Parser::acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::s
         }
         // List type can only be Delimited now.
         // Split the input
-        if (opt->arity > 1 || ((opt->flags & (*Flags::O_Multi)) && (opt->multi_cfg.type == Multi_type::Delimited)))
+        if (opt->arity > 1 || ((opt->flags & (*Flags::Multi)) && (opt->multi_cfg.type == Multi_type::Delimited)))
         {
             std::string_view delim = (opt->arity > 1) ? opt->list_cfg.delimiter : opt->multi_cfg.delimiter;
 
@@ -1500,7 +1664,7 @@ bool cl::Parser::acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::s
 
             // Check for delimiter splitting again
             bool split_needed = (opt->arity > 1 && opt->list_cfg.type == List_type::Delimited) ||
-                                ((opt->flags & *Flags::O_Multi) && opt->multi_cfg.type == Multi_type::Delimited);
+                                ((opt->flags & *Flags::Multi) && opt->multi_cfg.type == Multi_type::Delimited);
 
             if (split_needed)
             {
@@ -1632,7 +1796,7 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
     using CanonElem = typename _opt_type_to_canonical_type_t_<target_enum>::value;
 
     // Safety check against configurers trying to sneak in Multi/Array
-    if ((opt.flags & *Flags::O_Multi) || (opt.list_cfg.type != List_type::Consecutive))
+    if ((opt.flags & *Flags::Multi) || (opt.list_cfg.type != List_type::Consecutive))
         panic("Positionals must be scalar (no Multi/Array flags allowed).");
 
     // 2. Prepare Storage
@@ -1657,7 +1821,7 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
         .default_value = val});
 
     // 4. Default Values
-    if (opt.flags & (*Flags::O_Default))
+    if (opt.flags & (*Flags::Default))
     {
         o->default_value = opt.default_val;
         o->default_hints = arena_.str(std::format("{}", opt.default_val));
@@ -1697,6 +1861,11 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
 
 inline void cl::Parser::handle_positional(Parse_ctx &ctx, std::string_view value)
 {
+    if (auto it = sub_cmd_name_map_.find(value); it != sub_cmd_name_map_.end())
+    {
+        ctx.active_sub_id = it->second;
+        return; // Consumed as a command, not a value
+    }
     // Check if we have any positionals left to fill
     if (ctx.positional_ind >= positional_ids_.size())
     {
