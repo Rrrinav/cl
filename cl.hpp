@@ -393,6 +393,17 @@ struct Name_config
     std::source_location loc;
 };
 
+struct Single_name_cfg
+{
+    std::string_view long_name;
+    std::source_location loc;
+};
+
+constexpr auto name(std::string_view l, std::source_location loc = std::source_location::current())
+{
+    return Single_name_cfg{l, loc};
+}
+
 constexpr auto name(std::string_view s, std::string_view l, std::source_location loc = std::source_location::current())
 {
     return Name_config{s, l, loc};
@@ -645,25 +656,71 @@ struct Parse_res
     std::vector<Runtime> runtime_;
     std::vector<Option_info> opt_info_;
 
-    // TODO: below
-    // PERF: Maybe we should return a refernce to be copied or something for performance
-    template<typename T>
-    auto get(Opt_id id) -> T
+    template <typename T>
+    [[nodiscard]]
+    auto get(Opt_id id) const -> T
     {
-        return std::get<T>(runtime_[id].runtime_value);
+        // Safety check for ID bounds
+        if (id >= runtime_.size())
+        {
+            // In a real library, you might throw a specific exception or panic
+            std::println(stderr, "[CL Error] Invalid Option ID accessed: {}", id);
+            std::exit(EXIT_FAILURE);
+        }
+
+        const auto &val_variant = runtime_[id].runtime_value;
+
+        // CASE 1: User wants std::array (Fixed List)
+        // We stored it as std::vector in the variant, so we must convert it.
+        if constexpr (is_std_array_v<T>)
+        {
+            using InnerT = typename T::value_type;
+
+            // Ensure the variant actually holds a vector of the correct inner type
+            if (!std::holds_alternative<std::vector<InnerT>>(val_variant))
+            {
+                std::println(stderr, "[CL Error] Type Mismatch: Option ID {} is not stored as a vector (cannot convert to array).", id);
+                std::exit(EXIT_FAILURE);
+            }
+
+            const auto &vec = std::get<std::vector<InnerT>>(val_variant);
+
+            // Runtime size check (The parser logic should have ensured this, but safe is better)
+            if (vec.size() != std::tuple_size_v<T>)
+            {
+                std::println(stderr, "[CL Error] Array size mismatch for ID {}. Expected {}, got {}.", id, std::tuple_size_v<T>, vec.size());
+                std::exit(EXIT_FAILURE);
+            }
+
+            T arr_result;
+            std::copy(vec.begin(), vec.end(), arr_result.begin());
+            return arr_result;
+        }
+        // CASE 2: User wants exactly what is stored (int, float, string, vector<...>)
+        else
+        {
+            // std::get will throw std::bad_variant_access if T doesn't match the active member.
+            // You can wrap this try-catch if you want cleaner error messages.
+            try
+            {
+                return std::get<T>(val_variant);
+            }
+            catch (const std::bad_variant_access &)
+            {
+                std::println(stderr, "[CL Error] Type Mismatch for ID {}. Requested {}, but variant holds index {}.", id, typeid(T).name(), val_variant.index());
+                std::exit(EXIT_FAILURE);
+            }
+        }
     }
 };
 
-// Inside cl.hpp, after Parse_err definition or outside namespace cl
-inline std::ostream& operator<<(std::ostream& os, const cl::Parse_err& err) {
-    for (const auto& e : err.errors) {
-        os << "Error in option '" << e.option << "': " << e.message << "\n";
-    }
+inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err)
+{
+    for (const auto &e : err.errors)
+        os << "[Error] Option: " << (e.option.empty() ? "N/A" : e.option) << "\n" << "   | " << e.message << "\n";
     return os;
 }
-// -----------------------------------------------------------------------------
-// PARSER
-// -----------------------------------------------------------------------------
+
 class Parser
 {
 public:
@@ -698,6 +755,7 @@ private:
         const Parser_config &cfg;
         bool stop_flags;
         std::string_view curr_key{};
+        std::size_t positional_ind{0};
 
         Parse_ctx( Arg_stream& a, Parse_err & e, Parse_res& r, Parser_config& c) : args(a), res(r), err(e), cfg(c), stop_flags(false) {}
         Parse_ctx(const Parse_ctx & p) = delete;
@@ -742,14 +800,7 @@ private:
 public:
     Parser_config cfg_;
 
-    explicit Parser(std::string s = "", std::string des = "", std::size_t reserve = 15)
-        : name_(std::move(s)), description_(std::move(des)), arena_(Arena())
-    {
-        options_.reserve(reserve);
-        runtime_.reserve(reserve);
-        long_arg_to_id_.reserve(reserve);
-        short_arg_to_id_.reserve(52); 
-    }
+    explicit Parser(std::string s = "", std::string des = "", std::size_t reserve = 15);
 
     void add_explicit_bool_strs(const std::vector<std::string> & truthy, const std::vector<std::string> & falsy);
 
@@ -760,19 +811,24 @@ public:
     auto parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse_err>;
 
     auto print_help(std::ostream& os = std::cout) -> void;
+
+    template<typename T, typename ...Configs>
+    requires ((Configurer<Configs, T> && ...) && Supported_Scalar_C<T>)
+    auto positional(Single_name_cfg name, Configs&&... confs) -> Opt_id;
+
 private:
 
     template <typename T>
     requires Parsable_Type_C<T>
     inline auto add_impl(Opt<T> opt) -> Opt_id;
 
+    template <typename T>
+    requires cl::Supported_Scalar_C<T>
+    inline auto add_positional_impl(Opt<T> opt) -> Opt_id;
+
     template <typename... Args>
     [[noreturn]]
-    inline auto panic(std::format_string<Args...> fmt, Args&&... args) const -> void
-    {
-        std::println(stderr, "[ERR]: {}", std::format(fmt, std::forward<Args>(args)...));
-        std::exit(EXIT_FAILURE);
-    }
+    auto panic(std::format_string<Args...> fmt, Args&&... args) const -> void;
 
     inline auto assign_id() -> Opt_id { return this->next_id_++; }
 
@@ -786,6 +842,10 @@ private:
     bool acquire_value(Parse_ctx& ctx, Option* opt, std::optional<std::string_view> explicit_val);
     void inject_value(Parse_ctx &ctx, Option *opt, std::span<const std::string_view> raw_values);
     void assign_true(Runtime& rt);
+    void handle_positional(Parse_ctx &ctx, std::string_view value);
+
+private:
+    std::vector<Opt_id> positional_ids_;
 };
 
 } // namespace cl
@@ -863,6 +923,7 @@ struct std::formatter<cl::Parse_err>
     }
 };
 
+#define CL_IMPLEMENTATION
 #ifdef CL_IMPLEMENTATION
 #include <charconv>
 #include <ranges>
@@ -885,6 +946,23 @@ constexpr std::string_view type_name()
         return typeid(T).name();
         // return "unsupported compiler: send patches :)";
     #endif
+}
+
+cl::Parser::Parser(std::string s, std::string des, std::size_t reserve)
+: name_(std::move(s)), description_(std::move(des)), arena_(Arena())
+{
+    options_.reserve(reserve);
+    runtime_.reserve(reserve);
+    long_arg_to_id_.reserve(reserve);
+    short_arg_to_id_.reserve(52); 
+}
+
+template <typename... Args>
+[[noreturn]]
+inline auto cl::Parser::panic(std::format_string<Args...> fmt, Args&&... args) const -> void
+{
+    std::println(stderr, "[ERR]: {}", std::format(fmt, std::forward<Args>(args)...));
+    std::exit(EXIT_FAILURE);
 }
 
 void cl::Parser::add_explicit_bool_strs(const std::vector<std::string> &truthy, const std::vector<std::string> &falsy)
@@ -937,18 +1015,6 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         if (short_arg_to_id_.contains(name)) panic("Duplicate option: -{}", name);
         short_arg_to_id_.emplace(name, id);
     }
-    if (opt.flags & *Flags::O_Env)
-    {
-        auto is_valid_env = [](std::string_view name)
-        {
-            if (name.empty() || std::isdigit(name[0]))
-                return false;
-            return std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '_'; });
-        };
-        if (!is_valid_env(opt.env_))
-            panic("Invalid environment variable name: '{}'", opt.env_);
-    }
-
     // 2. Analyze Types & Determine Canonical Storage
     constexpr Opt_type target_enum = parsable_to_opt_type<T>();
     using CanonElem = typename _opt_type_to_canonical_type_t_<target_enum>::value;
@@ -1000,6 +1066,19 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     else
     {
         val = CanonElem{};
+    }
+
+    if (opt.flags & *Flags::O_Env)
+    {
+        if (arity != 1 || target_enum != Opt_type::Str || (opt.flags & *Flags::O_Multi)) panic("Environment varialble fallback only applies to scalar strings.");
+        auto is_valid_env = [](std::string_view name)
+        {
+            if (name.empty() || std::isdigit(name[0]))
+                return false;
+            return std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '_'; });
+        };
+        if (!is_valid_env(opt.env_))
+            panic("Invalid environment variable name: '{}'", opt.env_);
     }
 
     // 4. Extract Validator Helps
@@ -1142,26 +1221,61 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
             this->handle_long_token(ctx, tok.substr(2));
         else if (tok.starts_with("-"))
             this->handle_short_token(ctx, tok.substr(1));
+        else
+            this->handle_positional(ctx, tok);
     }
 
     if (!err.errors.empty()) return std::unexpected(err);
 
     res.opt_info_.resize(this->options_.size());
-
-    for (auto i{0uz}; i < this->options_.size(); i++)
+    for (size_t i = 0; i < this->options_.size(); ++i)
     {
-        Option * opt = this->options_[i];
-        res.opt_info_[i].type    = opt->type;
-        res.opt_info_[i].arity   = opt->arity;
-        res.opt_info_[i].storage = opt->storage;
+        Option *opt = this->options_[i];
+        Runtime &rt = res.runtime_[i];
+        Parse_res::Option_info& opt_i = res.opt_info_[i];
 
-        if (res.runtime_[i].parsed) continue;
+        // 1. Try Environment Variable (If not parsed from CLI)
+        if (!rt.parsed && (opt->flags & *Flags::O_Env) && !opt->env.empty())
+        {
+            if (const char *env_val = std::getenv(opt->env.data()))
+            {
+                // We treat Env var as a single string input.
+                // If it's an array/multi, we assume it might be comma-delimited.
+                // Reusing the injection logic requires a tiny bit of setup:
+                std::string_view sv{env_val};
+                std::vector<std::string_view> env_inputs;
+                env_inputs.push_back(sv);
+                ctx.curr_key = opt->env;
+                this->inject_value(ctx, opt, env_inputs);
+            }
+        }
 
-        if ((opt->flags & (*Flags::O_Default)))
-            res.runtime_[i].runtime_value = opt->default_value;
+        // 2. Apply Default (If still not parsed)
+        if (!rt.parsed && (opt->flags & *Flags::O_Default))
+        {
+            rt.runtime_value = opt->default_value;
+            rt.parsed = true;
+            // Note: Defaults are trusted, we assume they are valid types.
+        }
+
+        // 3. Check Required (Final Check)
+        if (!rt.parsed && (opt->flags & *Flags::O_Required))
+        {
+            // If it's required, but we haven't seen it in CLI, Env, or Defaults
+            err.push_err(opt->names[0], "Required option is missing.");
+        }
+
+        opt_i.type    = opt->type;
+        opt_i.arity   = opt->arity;
+        opt_i.storage = opt->storage;
+
+        if (rt.parsed) continue;
+
+        if ((opt->flags & (*Flags::O_Default))) rt.runtime_value = opt->default_value;
     }
 
-    return res;
+    if (!err.errors.empty()) return std::unexpected(err);
+    else return res;
 }
 
 template <typename Dest>
@@ -1489,6 +1603,117 @@ void cl::Parser::assign_true(Runtime& rt)
     rt.runtime_value = true;
     rt.count++;
     rt.parsed = true;
+}
+
+
+template<typename T, typename ...Configs>
+requires ((cl::Configurer<Configs, T> && ...) && cl::Supported_Scalar_C<T>)
+auto cl::Parser::positional(Single_name_cfg name, Configs&&... confs) -> Opt_id
+{
+    static_assert(!is_std_vector_v<T> && !is_std_array_v<T>, 
+    "Positionals restricted to Scalars only (int, float, string, bool).");
+
+    Opt<T> opt;
+    opt.args[1] = name.long_name;
+    opt.loc = name.loc;
+    (confs(opt), ...);
+
+    return this->add_positional_impl(opt);
+}
+
+template <typename T>
+requires cl::Supported_Scalar_C<T>
+inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
+{
+    auto id = assign_id();
+
+    // 1. Basic Setup (Scalar Only)
+    constexpr Opt_type target_enum = parsable_to_opt_type<T>();
+    using CanonElem = typename _opt_type_to_canonical_type_t_<target_enum>::value;
+
+    // Safety check against configurers trying to sneak in Multi/Array
+    if ((opt.flags & *Flags::O_Multi) || (opt.list_cfg.type != List_type::Consecutive))
+        panic("Positionals must be scalar (no Multi/Array flags allowed).");
+
+    // 2. Prepare Storage
+    Runtime_value val = CanonElem{};
+
+    // 3. Create Option
+    std::vector<std::string_view> v_helps;
+    for (const auto &v : opt.validators_) v_helps.push_back(this->arena_.str(v.help));
+
+    Option *o = arena_.make<Option>(Option{.id = id,
+        .names = {"", arena_.str(opt.args[1])},  // [1] is Display Name, [0] empty
+        .desc = arena_.str(opt.desc),
+        .type = target_enum,
+        .storage = Storage_kind::Scalar,  // Forced Scalar
+        .flags = opt.flags,
+        .list_cfg = opt.list_cfg,
+        .multi_cfg = opt.multi_cfg,
+        .arity = 1,  // Forced Arity 1
+        .meta = arena_.str(opt.meta_),
+        .env = arena_.str(opt.env_),
+        .validator_helps = v_helps,
+        .default_value = val});
+
+    // 4. Default Values
+    if (opt.flags & (*Flags::O_Default))
+    {
+        o->default_value = opt.default_val;
+        o->default_hints = arena_.str(std::format("{}", opt.default_val));
+    }
+
+    // 5. Validator
+    if (!opt.validators_.empty())
+    {
+        o->validate = [entries = opt.validators_](const Runtime_value &rv) -> std::expected<void, std::string>
+        {
+            auto check_one = [&](const T &val) -> std::expected<void, std::string>
+            {
+                for (const auto &e : entries)
+                    if (auto r = e.func(val); !r)
+                        return r;
+                return {};
+            };
+            // It's always scalar per your restriction
+            const auto &canon_val = std::get<CanonElem>(rv);
+            return check_one(static_cast<T>(canon_val));
+        };
+    }
+    else
+    {
+        o->validate = [](const auto &) -> std::expected<void, std::string> { return {}; };
+    }
+
+    // 6. Register
+    options_.push_back(o);
+    runtime_.push_back(Runtime{.runtime_value = o->default_value});
+
+    // IMPORTANT: Track this as a positional
+    this->positional_ids_.push_back(id);
+
+    return id;
+}
+
+inline void cl::Parser::handle_positional(Parse_ctx &ctx, std::string_view value)
+{
+    // Check if we have any positionals left to fill
+    if (ctx.positional_ind >= positional_ids_.size())
+    {
+        ctx.error("Unexpected positional argument: '{}'", value);
+        return;
+    }
+
+    Opt_id id = positional_ids_[ctx.positional_ind];
+    Option *opt = options_[id];
+
+    // Inject the value
+    // We treat it as a single element span
+    std::string_view arr_input[] = {value};
+    this->inject_value(ctx, opt, std::span(arr_input));
+
+    // Since it's strictly scalar, we ALWAYS move to the next positional
+    ctx.positional_ind++;
 }
 
 auto cl::Parser::print_help(std::ostream &os) -> void

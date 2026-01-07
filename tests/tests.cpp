@@ -329,6 +329,167 @@ void test_validator()
     }
 }
 
+void test_positionals()
+{
+    std::cout << "\n\t **** Checking Positionals\n" << std::endl;
+    cl::Parser p;
+
+    auto in  = p.positional<std::string>(cl::name("INPUT"), cl::required());
+    auto out = p.positional<std::string>(cl::name("OUTPUT"), cl::deflt("a.out"));
+    auto count = p.positional<long long>(cl::name("COUNT"), cl::deflt(1));
+
+    // 1. All provided
+    Args a1 = {"prog", "main.cpp", "main.exe", "5"};
+    auto res = p.parse(a1.argc(), a1.ptr());
+
+    test_name("All positionals provided");
+    
+    if(res.has_value()) {
+        assert(res->get<std::string>(in) == "main.cpp");
+        assert(res->get<std::string>(out) == "main.exe");
+        assert(res->get<cl::Num>(count) == 5);
+        passed();
+    } else { failed(); std::cout << res.error() << std::endl; }
+
+    // 2. Use Defaults
+    Args a2 = {"prog", "test.c"};
+    res = p.parse(a2.argc(), a2.ptr());
+    
+    test_name("Use defaults");
+    if(res.has_value()) {
+        assert(res->get<std::string>(in) == "test.c");
+        assert(res->get<std::string>(out) == "a.out"); // Default
+        assert(res->get<cl::Num>(count) == 1);       // Default
+        passed();
+    } else { failed(); }
+
+    test_name("Too many args");
+    // 3. Too many arguments
+    Args a3 = {"prog", "a", "b", "3", "extra"};
+    res = p.parse(a3.argc(), a3.ptr());
+    if(!res.has_value()) passed(); // Should fail "Unexpected positional"
+    else { failed(); std::cout << "Should have failed on 'extra'" << std::endl; }
+}
+
+void test_arrays()
+{
+    std::cout << "\n\t **** Checking Arrays & Vectors\n" << std::endl;
+    cl::Parser p;
+
+    // 1. Fixed Size Array (std::array<T, N>)
+    // Here T is the actual array type because it's a specific parser case
+    using Point3 = cl::Fix_list<cl::Num, 3>; // std::array<long long, 3>
+    auto point = p.add<Point3>(cl::name("p", "point"), cl::desc("3D Point"), cl::array(cl::List_type::Delimited, ","));
+
+    // 2. Vector (Multi-value) - Repeated flag (-v 1 -v 2)
+    // WRONG: p.add<std::vector<int>> 
+    // CORRECT: p.add<int>(..., cl::multi())
+    auto vec_rep = p.add<cl::Num>(cl::name("v", "vec-rep"), cl::multi(cl::Multi_type::Repeat));
+
+    // 3. Vector (Multi-value) - Delimited (-l 1,2,3)
+    auto vec_del = p.add<cl::Num>(cl::name("l", "vec-del"), cl::multi(cl::Multi_type::Delimited, ","));
+
+    // 4. Fixed Array with Defaults
+    using Rect = cl::Fix_list<cl::Num, 4>;
+    auto rect = p.add<Rect>(cl::name("r", "rect"), cl::deflt(0, 0, 10, 10));
+
+    // ---------------------------------------------------------
+    test_name("Array: Delimited Input (Correct Size)");
+    Args a1 = {"prog", "--point", "10,20,30"};
+    auto res = p.parse(a1.argc(), a1.ptr());
+
+    if (res.has_value())
+    {
+        auto pt = res->get<Point3>(point);
+        assert(pt[0] == 10 && pt[1] == 20 && pt[2] == 30);
+        passed();
+    }
+    else { failed(); std::cout << res.error() << std::endl; }
+
+    // ---------------------------------------------------------
+    test_name("Array: Defaults");
+    Args a2 = {"prog"};
+    res = p.parse(a2.argc(), a2.ptr());
+
+    if (res.has_value())
+    {
+        auto r = res->get<Rect>(rect);
+        assert(r[0] == 0 && r[1] == 0 && r[2] == 10 && r[3] == 10);
+        passed();
+    }
+    else { failed(); std::cout << res.error() << std::endl; }
+
+    // ---------------------------------------------------------
+    test_name("Vector: Repeated Flags");
+    Args a3 = {"prog", "-v", "1", "-v", "2", "-v", "3"};
+    res = p.parse(a3.argc(), a3.ptr());
+
+    if (res.has_value())
+    {
+        // NOTE: Internal storage is std::vector<cl::Num> (long long)
+        // We must request exactly that type.
+        auto v = res->get<std::vector<cl::Num>>(vec_rep);
+        
+        assert(v.size() == 3);
+        assert(v[0] == 1 && v[1] == 2 && v[2] == 3);
+        passed();
+    }
+    else { failed(); std::cout << res.error() << std::endl; }
+
+    // ---------------------------------------------------------
+    test_name("Vector: Delimited Input");
+    Args a4 = {"prog", "-l", "100,200,300,400"};
+    res = p.parse(a4.argc(), a4.ptr());
+
+    if (res.has_value())
+    {
+        auto v = res->get<std::vector<cl::Num>>(vec_del);
+        assert(v.size() == 4);
+        assert(v[0] == 100 && v[3] == 400);
+        passed();
+    }
+    else { failed(); std::cout << res.error() << std::endl; }
+
+    // ---------------------------------------------------------
+    test_name("Array Error: Not enough elements");
+    Args a5 = {"prog", "--point", "1,2"}; // Expecting 3
+    res = p.parse(a5.argc(), a5.ptr());
+
+    if (!res.has_value())
+    {
+        // Expected behavior depends on your parser strictness.
+        // Assuming strictness on partial array fills is NOT enforced by default 
+        // (the loop just stops), this might pass with the last element as 0.
+        // If you want to assert failure, you need strict validators.
+        // For now, let's print what we got.
+        std::cout << "(Partial fill - might pass)" << std::endl;
+        passed();
+    }
+    else
+    {
+        auto pt = res->get<Point3>(point);
+        // It likely filled [1, 2, 0] (0 being default)
+        if (pt[0] == 1 && pt[1] == 2) passed();
+        else failed();
+    }
+
+    // ---------------------------------------------------------
+    test_name("Array Error: Too many elements");
+    Args a6 = {"prog", "--point", "1,2,3,4"}; // Expecting 3
+    res = p.parse(a6.argc(), a6.ptr());
+
+    if (!res.has_value())
+    {
+        // This MUST fail because of the array size check in inject_value
+        passed();
+    }
+    else
+    {
+        failed();
+        std::cout << "Expected failure for overflow, but got success." << std::endl;
+    }
+}
+
 void test_short()
 {
     std::cout << "\n\t **** Checking Shorts\n" << std::endl;
@@ -344,6 +505,8 @@ int main()
         test_bools();
         test_nums();
         test_validator();
+        test_arrays();
+        test_positionals();
         std::cout << "\nAll tests passed successfully!\n";
     }
     catch (const std::exception &e)

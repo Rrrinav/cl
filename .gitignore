@@ -3,3 +3,5 @@ cl
 compile_commands.json
 main
 bin/
+temp*
+*test*
