@@ -1,27 +1,32 @@
+#include <cstdint>
 #include <print>
 #include "cl.hpp"
 
 int main(int argc, char *argv[])
 {
-    cl::Parser p("Hoi", "Heya mein friend.");
+    cl::Parser p("", "");
 
-    auto a = p.add<cl::Num>( cl::name("a", "Ao"), cl::deflt(0), cl::multi());
-    auto b = p.add<cl::Flag>(cl::name("b", "Bo"));
-    auto c = p.add<cl::Fix_list<cl::Num, 3>>(cl::name("c", "Co"));
-    auto d = p.add<cl::Fp_Num>(cl::name("d", "Do"), cl::env("c"));
-    auto e = p.add<cl::Text>(cl::name("e", "Eo"));
-    auto f = p.add<cl::Num>(cl::name("f", "Fo"));
+    auto d_s = p.add_sub_cmd("device", "device configurations", 0);
+    auto s_s = p.add_sub_cmd("software", "software management", 0);
+
+    auto d_a = p.add<cl::Text>(cl::name("a", "add"), cl::desc("device to add"), cl::sub_cmd(d_s));
+    auto s_a = p.add<cl::Text>(cl::name("a", "add"), cl::desc("software to add"), cl::sub_cmd(s_s));
+    auto S_a = p.add<cl::Text>(cl::name("a", "add"), cl::desc("something to add"));
 
     auto res = p.parse(argc, argv);
+
     if (!res)
-    {
         std::println("{}", res.error());
-        return 1;
-    }
-    std::println("a: {}", res->get<cl::List<cl::Num>>(a));
-    std::println("b: {}", res->get<cl::Flag>(b));
-    std::println("c: {}", res->get<cl::List<cl::Num>>(c));
-    std::println("d: {}", res->get<cl::Fp_Num>(d));
-    std::println("e: {}", res->get<cl::Text>(e));
-    std::println("f: {}", res->get<cl::Num>(f));
+
+    std::string add_text = "";
+
+    if (res->get<cl::Text>(d_a, add_text))
+        std::println("device add: {}", add_text);
+    if (res->get<cl::Text>(s_a, add_text))
+        std::println("software add: {}", add_text);
+
+    auto d_res = res->get_sub(d_res);
+    d_res->get<cl::Num>(d_a);
+    res->get<cl::Num>("device", "add");
+    res->get<cl::Num>("add");
 }
