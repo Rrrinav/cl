@@ -1,5 +1,5 @@
-#ifndef __CL_HPP_
-#define __CL_HPP_
+#ifndef CL_HPP_
+#define CL_HPP_
 
 #include <sys/types.h>
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <new>
 #include <optional>
 #include <print>
@@ -255,6 +256,8 @@ public:
 
     Arena(const Arena &) = delete;
     Arena &operator=(const Arena &) = delete;
+    Arena(Arena &&) noexcept = default;
+    Arena &operator=(Arena &&) noexcept = default;
 
     ~Arena()
     {
@@ -738,36 +741,40 @@ struct Runtime
     Runtime &operator=(const Runtime &r) = default;
 };
 
-struct Option_info
+namespace detail {
+struct Option
 {
-    std::size_t arity;
-    std::string_view env;
+    Opt_id id;
+    std::array<std::string_view, 2> names;
+    std::string_view desc;
     Opt_type type;
     Storage_kind storage;
+    uint16_t flags;
+    List_cfg list_cfg;
+    Multi_cfg multi_cfg;
+    std::size_t arity;
+    std::string_view meta;
+    std::string_view env;
+    std::vector<std::string_view> validator_helps;
+    std::string_view default_hints;
+    Runtime_value default_value;
+    Subcommand_id sub_id;
+
+    std::function<std::expected<void, std::string>(const Runtime_value &)> validate;
 };
 
-struct Subcommand_info
+struct Commands_schema
 {
-    Subcommand_id id;
-    std::string name;
+    Arena arena_ = Arena();
+    std::vector<Subcommand *> sub_cmds_{};
+    std::vector<detail::Option *> options_{};
 };
-
-/*
-    auto d_res = res->get_sub(d_res);
-    d_res->get<cl::Num>(d_a);
-    res->get<cl::Num>("device", "add");
-    res->get<cl::Num>("add");
-
-    subcommand, subcommand, option
-
-    if(chain.find(subcommand))
-*/
+}
 
 struct Parse_res
 {
-    std::vector<Option_info> opt_info_;
+    std::shared_ptr<detail::Commands_schema> _schema;
     std::vector<Runtime> runtime_;
-    std::unordered_map<Opt_id, Option_info> inserted_opt_info;
 
     template <typename T>
     requires Gettable_Type_C<T>
@@ -802,9 +809,9 @@ struct Parse_res
             return std::unexpected(std::format("[CL Error] Invalid Option ID: {}", id));
 
         const auto &rt = runtime_[id];
-        const auto &info = opt_info_[id];
+        const auto* info = this->_schema->options_.at(id);
 
-        bool is_vector = (info.storage == Storage_kind::Vector);
+        bool is_vector = (info->storage == Storage_kind::Vector);
         if (!rt.parsed && !is_vector)
             return std::unexpected("Option not set");
 
@@ -847,26 +854,6 @@ inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err)
 class Parser
 {
 public:
-    struct Option
-    {
-        Opt_id id;
-        std::array<std::string_view, 2> names;
-        std::string_view desc;
-        Opt_type type;
-        Storage_kind storage;
-        uint16_t flags;
-        List_cfg list_cfg;
-        Multi_cfg multi_cfg;
-        std::size_t arity;
-        std::string_view meta;
-        std::string_view env;
-        std::vector<std::string_view> validator_helps;
-        std::string_view default_hints;
-        Runtime_value default_value;
-        Subcommand_id sub_id;
-
-        std::function<std::expected<void, std::string>(const Runtime_value &)> validate;
-    };
     std::vector<std::string> truthy_strs = {"y", "true", "yes", "t"};
     std::vector<std::string> falsy_strs = {"n", "false", "no", "f"};
 
@@ -913,16 +900,12 @@ private:
     static constexpr int sn_index = 0;
     static constexpr int ln_index = 1;
 
-    Arena arena_;
     std::string name_;
     std::string description_;
     Opt_id next_id_ = 0;
 
-    std::unordered_map<std::string_view, Opt_id> root_long_arg_to_id_;
-    std::unordered_map<std::string_view, Opt_id> root_short_arg_to_id_;
-    std::vector<Option *> options_;
     std::vector<Runtime> runtime_;
-    std::vector<Subcommand *> sub_cmds_;
+    std::shared_ptr<detail::Commands_schema> _schema;
 
 public:
     Parser_config cfg_;
@@ -938,15 +921,15 @@ public:
     inline auto add_sub_cmd(const std::string &name, const std::string &desc, uint16_t flags, Subcommand_id parent_id = global_command, int reserve = 4) -> Subcommand_id
     {
         // 1. Validation & Parent Lookup
-        Subcommand_id id = static_cast<Subcommand_id>(sub_cmds_.size());
-        bool is_root = sub_cmds_.empty();
+        Subcommand_id id = static_cast<Subcommand_id>(this->_schema->sub_cmds_.size());
+        bool is_root = this->_schema->sub_cmds_.empty();
 
         if (!is_root)
         {
-            if (parent_id >= sub_cmds_.size())
+            if (parent_id >= this->_schema->sub_cmds_.size())
                 throw std::invalid_argument(std::format("Attempted to add subcommand '{}' to invalid parent ID: {}", name, parent_id));
 
-            Subcommand *parent = sub_cmds_[parent_id];
+            Subcommand *parent = this->_schema->sub_cmds_[parent_id];
             if (parent->child_to_id.contains(name))
                 throw std::invalid_argument(std::format("Duplicate subcommand name: '{}' in context '{}'", name, parent->name));
         }
@@ -954,10 +937,10 @@ public:
         cl::asrt::t(!name.empty(), "Subcommand name cannot be empty.");
 
         // 2. Allocation
-        Subcommand *g = arena_.make<Subcommand>(Subcommand{
+        Subcommand *g = this->_schema->arena_.make<Subcommand>(Subcommand{
             .id = id,
-            .name = arena_.str(name),
-            .description = arena_.str(desc),
+            .name = this->_schema->arena_.str(name),
+            .description = this->_schema->arena_.str(desc),
             .flags = flags,
             .child_options = {},
             .child_subcommands = {},
@@ -973,12 +956,13 @@ public:
         g->child_subcommands.reserve(reserve);
 
         // 3. Registration
-        sub_cmds_.push_back(g);
+        this->_schema->sub_cmds_.push_back(g);
 
         if (!is_root)
         {
             // Add to parent's child map using the persistent arena string view
-            sub_cmds_[parent_id]->child_to_id.emplace(g->name, id);
+            this->_schema->sub_cmds_[parent_id]->child_to_id.emplace(g->name, id);
+            this->_schema->sub_cmds_[parent_id]->child_subcommands.push_back(id);
         }
 
         return id;
@@ -987,9 +971,9 @@ public:
     inline auto get_sub_cmd_id(std::string_view name) const -> std::optional<Subcommand_id>
     {
         // Backwards compatibility: look in global scope (ID 0)
-        if (sub_cmds_.empty())
+        if (this->_schema->sub_cmds_.empty())
             return std::nullopt;
-        const auto &children = sub_cmds_[global_command]->child_to_id;
+        const auto &children = this->_schema->sub_cmds_[global_command]->child_to_id;
         auto it = children.find(name);
         if (it != children.end())
             return it->second;
@@ -998,8 +982,7 @@ public:
 
     auto parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse_err>;
 
-    auto print_help(std::ostream &os = std::cout) -> void;
-
+    auto print_help(std::ostream &os = std::cout, Subcommand_id sub_id = global_command, std::optional<Opt_id> opt_id = std::nullopt) -> void;
     template <typename T, typename... Configs>
     requires((Configurer<Configs, T> && ...) && Supported_Scalar_C<T>)
     auto positional(Single_name_cfg name, Configs &&...confs) -> Opt_id;
@@ -1022,14 +1005,59 @@ private:
     void handle_long_token(Parse_ctx &ctx, std::string_view body);
     void handle_short_token(Parse_ctx &ctx, std::string_view body);
     bool add_short_combined(Parse_ctx &ctx, std::string_view body);
-    bool acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::string_view> explicit_val);
-    void inject_value(Parse_ctx &ctx, Option *opt, std::span<const std::string_view> raw_values);
+    bool acquire_value(Parse_ctx &ctx, detail::Option *opt, std::optional<std::string_view> explicit_val);
+    void inject_value(Parse_ctx &ctx, detail::Option *opt, std::span<const std::string_view> raw_values);
     void assign_true(Runtime &rt);
-    void handle_positional(Parse_ctx &ctx, std::string_view value);
+    void handle_positional_and_subcmds(Parse_ctx &ctx, std::string_view value);
 private:
     std::vector<Opt_id> positional_ids_;
 };
+namespace detail
+{
+struct Help_entry
+{
+    std::string left;
+    std::string right;
+    bool is_header = false;
+};
 
+inline std::string format_option_flags(const detail::Option *opt)
+{
+    std::string s;
+    // Short name
+    if (!opt->names[0].empty())
+        s += std::format("-{}", opt->names[0]);
+
+    // Comma if both exist
+    if (!opt->names[0].empty() && !opt->names[1].empty())
+        s += ", ";
+
+    // Long name
+    if (!opt->names[1].empty())
+        s += std::format("--{}", opt->names[1]);
+
+    // Value hint
+    if (opt->arity > 0)
+    {
+        std::string type_hint = "VAL";
+        if (opt->type == Opt_type::Int)
+            type_hint = "INT";
+        else if (opt->type == Opt_type::Float)
+            type_hint = "FLOAT";
+        else if (opt->type == Opt_type::Str)
+            type_hint = "STR";
+
+        if (!opt->meta.empty())
+            type_hint = opt->meta;
+
+        if (opt->arity > 1 || (opt->flags & *Flags::Multi))
+            s += std::format(" <{}...>", type_hint);
+        else
+            s += std::format(" <{}>", type_hint);
+    }
+    return s;
+}
+}  // namespace detail
 }  // namespace cl
 
 template <>
@@ -1080,11 +1108,11 @@ struct std::formatter<cl::Storage_kind> : std::formatter<std::string_view>
 };
 
 template <>
-struct std::formatter<cl::Parser::Option, char>
+struct std::formatter<cl::detail::Option, char>
 {
     constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
 
-    auto format(const cl::Parser::Option &o, std::format_context &ctx) const
+    auto format(const cl::detail::Option &o, std::format_context &ctx) const
     {
         auto out = ctx.out();
         std::format_to(out, "Option{{ id={}, type={}, storage={}, arity={}, flags=0b{:b}, default_hints: {}}}", o.id, o.type, o.storage,
@@ -1125,6 +1153,8 @@ struct std::formatter<cl::Parse_err>
 #ifdef CL_IMPLEMENTATION
 #include <charconv>
 #include <ranges>
+#include <iostream>
+#include <iomanip>
 
 template <typename T>
 constexpr std::string_view type_name()
@@ -1146,9 +1176,9 @@ constexpr std::string_view type_name()
 #endif
 }
 
-cl::Parser::Parser(std::string s, std::string des, std::size_t reserve) : name_(std::move(s)), description_(std::move(des)), arena_(Arena())
+cl::Parser::Parser(std::string s, std::string des, std::size_t reserve) : name_(std::move(s)), description_(std::move(des)), _schema(std::make_shared<detail::Commands_schema>())
 {
-    options_.reserve(reserve);
+    this->_schema->options_.reserve(reserve);
     runtime_.reserve(reserve);
     this->add_sub_cmd("GLOBAL", "Global Context", 0);
 }
@@ -1190,16 +1220,16 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
         bool valid_chars = std::ranges::all_of(__name, [](char c) { return std::isalnum(c) || c == '-' || c == '_'; });
         cl::asrt::t( valid_chars && !__name.starts_with("-"), "Long option '{}' invalid. Must be alphanumeric/_/-, cannot start with '-'.", __name);
         cl::asrt::t(__name.size() > 1, "Long option '{}' must be > 1 char.", __name);
-        if (this->sub_cmds_[opt.sub_cmd_id]->long_arg_to_id_.contains(__name))
-            throw std::logic_error(std::format("Name: {} already exists in {} scope", __name, (this->sub_cmds_[opt.sub_cmd_id]->name)));
+        if (this->_schema->sub_cmds_[opt.sub_cmd_id]->long_arg_to_id_.contains(__name))
+            throw std::logic_error(std::format("Name: {} already exists in {} scope", __name, (this->_schema->sub_cmds_[opt.sub_cmd_id]->name)));
     };
 
     auto validate_short_name = [&](std::string_view __name)
     {
         cl::asrt::t(__name.size() == 1, "Short option '{}' must be 1 char.", __name);
         cl::asrt::t(std::isalpha(__name[0]), "Short option '{}' must be a letter.", __name);
-        if (this->sub_cmds_[opt.sub_cmd_id]->long_arg_to_id_.contains(__name))
-            throw std::logic_error(std::format("Name: {} already exists in {} scope", __name, (this->sub_cmds_[opt.sub_cmd_id]->name)));
+        if (this->_schema->sub_cmds_[opt.sub_cmd_id]->long_arg_to_id_.contains(__name))
+            throw std::logic_error(std::format("Name: {} already exists in {} scope", __name, (this->_schema->sub_cmds_[opt.sub_cmd_id]->name)));
     };
 
     auto validate_env_name = [&](std::string_view name)
@@ -1261,7 +1291,7 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     // 4. Default Value Construction (FIXED LOGIC)
     // ==================================================================================
     Runtime_value default_rt_val;
-    std::string default_str_hint;
+    std::string_view default_str_hint;
 
     // Helper to fill vector/array from a container or single value
     auto make_vector_storage = [&](const auto &source)
@@ -1286,7 +1316,7 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
 
     if (opt.flags & *Flags::Default)
     {
-        default_str_hint = arena_.str(std::format("{}", opt.default_val));
+        default_str_hint = this->_schema->arena_.str(std::format("{}", opt.default_val));
 
         if (storage_kind == Storage_kind::Scalar)
         {
@@ -1317,7 +1347,7 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     // ==================================================================================
     std::vector<std::string_view> v_helps;
     v_helps.reserve(opt.validators_.size());
-    for (const auto &v : opt.validators_) v_helps.push_back(this->arena_.str(v.help));
+    for (const auto &v : opt.validators_) v_helps.push_back(this->_schema->arena_.str(v.help));
 
     std::function<std::expected<void, std::string>(const Runtime_value &)> val_fn;
 
@@ -1379,18 +1409,18 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     // 6. Object Registration (FIXED ORDER)
     // ==================================================================================
 
-    Option *o = arena_.make<Option>(Option{
+    detail::Option *o = this->_schema->arena_.make<detail::Option>(detail::Option{
         .id = id,
-        .names = {arena_.str(opt.args[0]), arena_.str(opt.args[1])},
-        .desc = arena_.str(opt.desc),
+        .names = {this->_schema->arena_.str(opt.args[0]), this->_schema->arena_.str(opt.args[1])},
+        .desc = this->_schema->arena_.str(opt.desc),
         .type = target_enum,
         .storage = storage_kind,
         .flags = opt.flags,
         .list_cfg = opt.list_cfg,
         .multi_cfg = opt.multi_cfg,
         .arity = arity,
-        .meta = arena_.str(opt.meta_),
-        .env = arena_.str(opt.env_),
+        .meta = this->_schema->arena_.str(opt.meta_),
+        .env = this->_schema->arena_.str(opt.env_),
         .validator_helps = v_helps,
         .default_hints = default_str_hint,
         .default_value = default_rt_val,
@@ -1401,14 +1431,14 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     Runtime rt{};
     rt.runtime_value = default_rt_val;
 
-    options_.push_back(o);
+    this->_schema->options_.push_back(o);
     runtime_.push_back(rt);
 
     // Register to subcommand
-    if (opt.sub_cmd_id >= this->sub_cmds_.size())
+    if (opt.sub_cmd_id >= this->_schema->sub_cmds_.size())
         throw std::invalid_argument(std::format("Invalid subcommand id: {}.", opt.sub_cmd_id));
 
-    Subcommand* sub_command = this->sub_cmds_[opt.sub_cmd_id];
+    Subcommand* sub_command = this->_schema->sub_cmds_[opt.sub_cmd_id];
 
     sub_command->child_options.push_back(id);
     sub_command->long_arg_to_id_.emplace(o->names[1], id);
@@ -1428,9 +1458,10 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
     Parse_err err{};
     Parse_res res{};
     Parse_ctx ctx(args, err, res, this->cfg_);
+    res._schema = this->_schema;
     res.runtime_.resize(this->runtime_.size());
     std::copy(this->runtime_.begin(), this->runtime_.end(), res.runtime_.begin());
-    ctx.active_subcomamnd = this->sub_cmds_[global_command];
+    ctx.active_subcomamnd = this->_schema->sub_cmds_[global_command];
 
     while (!args.empty())
     {
@@ -1441,20 +1472,16 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
         else if (tok.starts_with("-"))
             this->handle_short_token(ctx, tok.substr(1));
         else
-            this->handle_positional(ctx, tok);
+            this->handle_positional_and_subcmds(ctx, tok);
     }
 
     if (!err.errors.empty())
         return std::unexpected(err);
 
-    res.opt_info_.resize(this->options_.size());
-
-    for (size_t i = 0; i < this->options_.size(); ++i)
+    for (size_t i = 0; i < this->_schema->options_.size(); ++i)
     {
-        Option *opt = this->options_[i];
+        detail::Option *opt = this->_schema->options_[i];
         Runtime &rt = res.runtime_[i];
-        Option_info &opt_i = res.opt_info_[i];
-
         // 1. Try Environment Variable (If not parsed from CLI)
         if (!rt.parsed && (opt->flags & *Flags::Env) && !opt->env.empty())
         {
@@ -1486,11 +1513,6 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
             if (opt->sub_id == global_command || opt->sub_id == ctx.active_sub_id)
                 err.push_err(opt->names[0], "Required option is missing.");
         }
-
-        opt_i.type = opt->type;
-        opt_i.arity = opt->arity;
-        opt_i.storage = opt->storage;
-
         if (rt.parsed)
             continue;
 
@@ -1560,7 +1582,7 @@ void cl::Parser::handle_long_token(Parse_ctx &ctx, std::string_view body)
     if (it == ctx.active_subcomamnd->long_arg_to_id_.end())
         return ctx.error("Unknown option");
 
-    Option *opt = options_[it->second];
+    detail::Option *opt = this->_schema->options_[it->second];
 
     if (opt->sub_id != global_command && opt->sub_id != ctx.active_sub_id)
         return ctx.error("Option '--{}' is not valid in the current context.", key);
@@ -1579,7 +1601,7 @@ void cl::Parser::handle_short_token(Parse_ctx &ctx, std::string_view body)
     if (it == ctx.active_subcomamnd->short_arg_to_id_.end())
         return ctx.error("Unknown flag -{}", key);
 
-    Option *opt = options_[it->second];
+    detail::Option *opt = this->_schema->options_[it->second];
 
     if (opt->sub_id != global_command && opt->sub_id != ctx.active_sub_id)
         return ctx.error("Flag '-{}' is not valid in the current context.", key);
@@ -1630,7 +1652,7 @@ bool cl::Parser::add_short_combined(Parse_ctx &ctx, std::string_view body)
             ctx.error("Unknown flag");
             return false;
         }
-        Option *curr_opt = this->options_[it->second];
+        detail::Option *curr_opt = this->_schema->options_[it->second];
 
         if (curr_opt->arity > 0)
         {
@@ -1643,7 +1665,7 @@ bool cl::Parser::add_short_combined(Parse_ctx &ctx, std::string_view body)
     return true;
 }
 
-bool cl::Parser::acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::string_view> explicit_val)
+bool cl::Parser::acquire_value(Parse_ctx &ctx, detail::Option *opt, std::optional<std::string_view> explicit_val)
 {
     auto &rt = ctx.res.runtime_[opt->id];
 
@@ -1752,7 +1774,7 @@ bool cl::Parser::acquire_value(Parse_ctx &ctx, Option *opt, std::optional<std::s
     return true;
 }
 
-void cl::Parser::inject_value(Parse_ctx &ctx, Option *opt, std::span<const std::string_view> raw_values)
+void cl::Parser::inject_value(Parse_ctx &ctx, detail::Option *opt, std::span<const std::string_view> raw_values)
 {
     auto &rt = ctx.res.runtime_[opt->id];
 
@@ -1872,19 +1894,19 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
 
     // 3. Create Option
     std::vector<std::string_view> v_helps;
-    for (const auto &v : opt.validators_) v_helps.push_back(this->arena_.str(v.help));
+    for (const auto &v : opt.validators_) v_helps.push_back(this->_schema->arena_.str(v.help));
 
-    Option *o = arena_.make<Option>(Option{.id = id,
-        .names = {"", arena_.str(opt.args[1])},  // [1] is Display Name, [0] empty
-        .desc = arena_.str(opt.desc),
+    detail::Option *o = this->_schema->arena_.make<detail::Option>(detail::Option{.id = id,
+        .names = {"", this->_schema->arena_.str(opt.args[1])},  // [1] is Display Name, [0] empty
+        .desc = this->_schema->arena_.str(opt.desc),
         .type = target_enum,
         .storage = Storage_kind::Scalar,  // Forced Scalar
         .flags = opt.flags,
         .list_cfg = opt.list_cfg,
         .multi_cfg = opt.multi_cfg,
         .arity = 1,  // Forced Arity 1
-        .meta = arena_.str(opt.meta_),
-        .env = arena_.str(opt.env_),
+        .meta = this->_schema->arena_.str(opt.meta_),
+        .env = this->_schema->arena_.str(opt.env_),
         .validator_helps = v_helps,
         .default_value = val});
 
@@ -1892,7 +1914,7 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
     if (opt.flags & (*Flags::Default))
     {
         o->default_value = opt.default_val;
-        o->default_hints = arena_.str(std::format("{}", opt.default_val));
+        o->default_hints = this->_schema->arena_.str(std::format("{}", opt.default_val));
     }
 
     // 5. Validator
@@ -1918,7 +1940,7 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
     }
 
     // 6. Register
-    options_.push_back(o);
+    this->_schema->options_.push_back(o);
     runtime_.push_back(Runtime{.runtime_value = o->default_value});
 
     // IMPORTANT: Track this as a positional
@@ -1927,18 +1949,18 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
     return id;
 }
 
-inline void cl::Parser::handle_positional(Parse_ctx &ctx, std::string_view value)
+inline void cl::Parser::handle_positional_and_subcmds(Parse_ctx &ctx, std::string_view value)
 {
     if (auto it = ctx.active_subcomamnd->child_to_id.find(value); it != ctx.active_subcomamnd->child_to_id.end())
     {
         ctx.active_sub_id = it->second;
-        ctx.active_subcomamnd = this->sub_cmds_[ctx.active_sub_id];
+        ctx.active_subcomamnd = this->_schema->sub_cmds_[ctx.active_sub_id];
         return;
     }
-    else if (auto it = this->sub_cmds_[global_command]->child_to_id.find(value); it != ctx.active_subcomamnd->child_to_id.end())
+    else if (auto it = this->_schema->sub_cmds_[global_command]->child_to_id.find(value); it != ctx.active_subcomamnd->child_to_id.end())
     {
         ctx.active_sub_id = it->second;
-        ctx.active_subcomamnd = this->sub_cmds_[ctx.active_sub_id];
+        ctx.active_subcomamnd = this->_schema->sub_cmds_[ctx.active_sub_id];
         return;
     }
     // Check if we have any positionals left to fill for the current command
@@ -1949,7 +1971,7 @@ inline void cl::Parser::handle_positional(Parse_ctx &ctx, std::string_view value
     }
 
     Opt_id id = positional_ids_[ctx.positional_ind];
-    Option *opt = options_[id];
+    detail::Option *opt = this->_schema->options_[id];
 
     // Inject the value
     // We treat it as a single element span
@@ -1960,63 +1982,138 @@ inline void cl::Parser::handle_positional(Parse_ctx &ctx, std::string_view value
     ctx.positional_ind++;
 }
 
-auto cl::Parser::print_help(std::ostream &os) -> void
+auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optional<Opt_id> opt_id) -> void
 {
-    os << "help\n";
-    //cl::debug::l1("Help: Generating Usage Info");
-    //os << "Usage: " << name_ << " [options] [args]\n";
-    //if (!description_.empty()) os << description_ << "\n";
-    //os << "Options:\n";
-    //
-    //size_t max_width = 0;
-    //for (const auto *opt : options_)
-    //{
-    //    if (opt->flags & *Flags::O_Hidden) continue;
-    //
-    //    size_t w = 0;
-    //    if (!opt->names[1].empty())                                   w += 2 + opt->names[1].size();
-    //    if (!opt->names[1].empty() && !opt->names[0].empty()) w += 2;
-    //    if (!opt->names[0].empty())                                   w += 2 + opt->names[0].size();
-    //    if (!opt->meta.empty())                                       w += 1 + opt->meta.size();
-    //    if (w > max_width)                                            max_width = w;
-    //}
-    //max_width += 4;
-    //
-    //for (const auto *opt : options_)
-    //{
-    //    if (opt->flags & *Flags::O_Hidden) continue;
-    //
-    //    std::string flags_part;
-    //    if (!opt->names[1].empty())                                   flags_part += std::format("-{}", opt->names[1]);
-    //    if (!opt->names[1].empty() && !opt->names[0].empty()) flags_part += ", ";
-    //    if (!opt->names[0].empty())                                   flags_part += std::format("--{}", opt->names[0]);
-    //    if (!opt->meta.empty())                                       flags_part += std::format(" {}", opt->meta);
-    //
-    //    os << "  " << std::left << std::setw(max_width) << flags_part;
-    //    os << opt->desc;
-    //
-    //    if (opt->flags & F_REQUIRED)
-    //        os << " [Required]";
-    //    if (!opt->default_val_str.empty() && opt->arity > 0)
-    //        os << " [Default: " << opt->default_val_str << "]";
-    //
-    //    if (!opt->validator_helps.empty())
-    //    {
-    //        os << " {";
-    //        bool f = true;
-    //        for (const auto &h : opt->validator_helps)
-    //        {
-    //            if (!f) os << ", ";
-    //            if (!h.empty()) os << h;
-    //            else os << "Check";
-    //            f = false;
-    //        }
-    //        os << "}";
-    //    }
-    //
-    //    os << "\n";
-    //}
-    //os << "\n";
+    // 1. Validate
+    if (sub_id >= this->_schema->sub_cmds_.size()) return;
+    Subcommand* sub = this->_schema->sub_cmds_[sub_id];
+
+    // 2. Option Drill-Down (Detailed Technical View)
+    if (opt_id.has_value())
+    {
+        Opt_id oid = *opt_id;
+        if (oid >= this->_schema->options_.size()) return;
+        detail::Option* opt = this->_schema->options_[oid];
+
+        os << "\nOPTION: " << detail::format_option_flags(opt) << "\n";
+        os << std::string(60, '-') << "\n";
+        os << " " << (opt->desc.empty() ? "No description." : opt->desc) << "\n\n";
+        os << " Type:    " << opt->type << "\n";
+        os << " Arity:   " << opt->arity << "\n";
+        if (opt->flags & *Flags::Required)      os << " Status:  Required\n";
+        if (opt->flags & *Flags::Env)           os << " Env:     " << opt->env << "\n";
+        if (opt->flags & *Flags::Default)       os << " Default: " << opt->default_hints << "\n";
+        if (!opt->validator_helps.empty()) {
+            os << " Checks:\n";
+            for(auto& h : opt->validator_helps) os << "   - " << h << "\n";
+        }
+        os << "\n";
+        return;
+    }
+
+    // 3. Layout Utilities
+    std::vector<detail::Help_entry> rows;
+    size_t max_left = 0;
+
+    auto add_row = [&](std::string l, std::string r) {
+        if (l.size() > max_left) max_left = l.size();
+        rows.push_back({l, r, false});
+    };
+    auto add_header = [&](std::string t) {
+        rows.push_back({t, "", true});
+    };
+
+    // --- USAGE ---
+    // Build path: main -> device -> list
+    std::vector<std::string_view> path;
+    Subcommand* curr = sub;
+    while (true) {
+        if (curr->id != global_command) path.push_back(curr->name);
+        if (curr->id == curr->parent_id) break;
+        curr = this->_schema->sub_cmds_[curr->parent_id];
+    }
+    
+    os << "USAGE: " << this->name_;
+    for (auto it = path.rbegin(); it != path.rend(); ++it) os << " " << *it;
+
+    // Logic: If children exist -> [COMMAND]. Always show [OPTIONS].
+    if (!sub->child_subcommands.empty()) os << " [COMMAND]";
+    os << " [OPTIONS]\n";
+
+    // --- DESCRIPTION ---
+    // Fix: Don't print description if it's the root (Global Context)
+    if (sub_id != global_command && !sub->description.empty())
+        os << "\n" << sub->description << "\n";
+
+    // --- COMMANDS ---
+    if (!sub->child_subcommands.empty())
+    {
+        add_header("\nCOMMANDS:");
+        
+        // Simple recursion for indentation
+        std::function<void(Subcommand_id, int)> print_subs;
+        print_subs = [&](Subcommand_id sid, int depth) 
+        {
+            Subcommand* s = this->_schema->sub_cmds_[sid];
+            // 2 spaces per level
+            std::string indent(depth * 2, ' ');
+            add_row(indent + std::string(s->name), std::string(s->description));
+            
+            // Recurse
+            for (auto child_id : s->child_subcommands) print_subs(child_id, depth + 1);
+        };
+
+        for (auto child_id : sub->child_subcommands) print_subs(child_id, 0);
+    }
+
+    // --- ARGUMENTS (Positionals) ---
+    bool has_pos = false;
+    for(auto pid : this->positional_ids_) {
+        bool belongs = false;
+        for(auto co : sub->child_options) if(co == pid) { belongs = true; break; }
+        
+        if (belongs) {
+            if(!has_pos) { add_header("\nARGUMENTS:"); has_pos = true; }
+            detail::Option* p = this->_schema->options_[pid];
+            add_row(std::format("<{}>", p->names[1]), std::string(p->desc));
+        }
+    }
+
+    // --- OPTIONS ---
+    // Only show options explicitly attached to THIS subcommand ID.
+    bool has_opts = false;
+    for (auto oid : sub->child_options)
+    {
+        // Skip positionals
+        bool is_pos = false;
+        for(auto pid : this->positional_ids_) if(pid == oid) is_pos = true;
+        if(is_pos) continue;
+
+        detail::Option* opt = this->_schema->options_[oid];
+        if (opt->flags & *Flags::Hidden) continue;
+
+        if (!has_opts) { add_header("\nOPTIONS:"); has_opts = true; }
+        
+        std::string right = std::string(opt->desc);
+        
+        if (opt->flags & *Flags::Required) right += " [Required]";
+        if (opt->flags & *Flags::Env)      right += " [Env: " + std::string(opt->env) + "]";
+        if ((opt->flags & *Flags::Default) && !opt->default_hints.empty()) 
+            right += " [Def: " + std::string(opt->default_hints) + "]";
+
+        add_row(detail::format_option_flags(opt), right);
+    }
+
+    // --- RENDER ---
+    size_t pad = max_left + 4;
+    for (const auto& r : rows)
+    {
+        if (r.is_header) os << r.left << "\n";
+        else {
+            os << "  " << std::left << std::setw(pad) << r.left << r.right << "\n";
+        }
+    }
+    os << "\n";
 }
 
 #endif  // !CL_IMPLEMENTATION

@@ -8,9 +8,9 @@
 
 ## TODOs
 
-- [ ] Implement sub-commands/commands grouping
+- [X] Implement sub-commands/commands grouping
 - [ ] Testing
-- [ ] Environment variable fallback (infrastructure exists but not implemented)
+- [X] Environment variable fallback (infrastructure exists but not implemented)
 - [ ] Mutual exclusivity constraints (--foo and --bar can't both be set)
 - [ ] Dependency constraints (--foo requires --bar to also be set)
 - [ ] Custom help formatting/theming options
@@ -19,11 +19,11 @@
 - [ ] Usage examples in help output
 - [ ] Grouped options in help (e.g., "Input Options:", "Output Options:")
 - [ ] Custom error messages per option
-- [ ] Did-you-mean suggestions for typos (--helo -> did you mean --help?)
+- [ ] "Did-you-mean" suggestions for typos (--helo -> did you mean --help?)
 - [ ] Option aliasing (multiple names for same option)
 - [ ] Deprecation warnings for options
 - [ ] Response files (@file.txt to read args from file)
-- [ ] Parse from string vector (not just argc/argv)
+- [ ] Parse from string vector (not just argc/argv) (partially done)
 - [ ] Better error messages with context (show where in argv the error occurred)
 - [ ] Negation flags (--no-color to disable --color)
 - [ ] Count flags (-vvv for verbosity level)
