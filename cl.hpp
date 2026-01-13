@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <cctype>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +21,6 @@
 #include <print>
 #include <source_location>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -700,17 +698,17 @@ inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err);
 namespace detail {
     struct Parse_ctx
     {
-        Arg_stream &args;
-        Parse_res &res;
-        Parse_err &err;
-        const Parser_config &cfg;
-        bool stop_flags;
-        std::string_view curr_key{};
-        std::size_t positional_ind{0};
-        Subcommand_id active_sub_id{global_command};
-        Subcommand *active_subcomamnd;
+        Arg_stream &_args;
+        Parse_res &_res;
+        Parse_err &_err;
+        const Parser_config &_cfg;
+        bool _stop_flags;
+        std::string_view _curr_key{};
+        std::size_t _positional_ind{0};
+        Subcommand_id _active_sub_id{global_command};
+        Subcommand *_active_subcomamnd;
 
-        Parse_ctx(Arg_stream &a, Parse_err &e, Parse_res &r, Parser_config &c) : args(a), res(r), err(e), cfg(c), stop_flags(false) {}
+        Parse_ctx(Arg_stream &a, Parse_err &e, Parse_res &r, Parser_config &c) : _args(a), _res(r), _err(e), _cfg(c), _stop_flags(false) {}
         Parse_ctx(const Parse_ctx &p) = delete;
         Parse_ctx(const Parse_ctx &&p) = delete;
         Parse_ctx operator=(const Parse_ctx &p) = delete;
@@ -750,7 +748,7 @@ private:
     requires cl::Supported_Scalar_C<T>
     inline auto add_positional_impl(Opt<T> opt) -> Opt_id;
 
-    inline auto assign_id() -> Opt_id { return this->next_id_++; }
+    inline auto assign_id() -> Opt_id { return this->_next_id++; }
 
     template <typename Dest>
     requires Supported_Scalar_C<Dest>
@@ -764,16 +762,16 @@ private:
     void assign_true(Runtime &rt);
     void handle_positional_and_subcmds(detail::Parse_ctx &ctx, std::string_view value);
 
-    static constexpr int sn_index = 0;
-    static constexpr int ln_index = 1;
+    static constexpr int _sn_index = 0;
+    static constexpr int _ln_index = 1;
 
-    std::string name_;
-    std::string description_;
-    Opt_id next_id_ = 0;
+    std::string _name;
+    std::string _description;
+    Opt_id _next_id = 0;
 
-    std::vector<Runtime> runtime_;
+    std::vector<Runtime> _runtime;
     std::shared_ptr<detail::Commands_schema> _schema;
-    std::vector<Opt_id> positional_ids_;
+    std::vector<Opt_id> _positional_ids;
 };
 
 }  // namespace cl
@@ -805,9 +803,10 @@ struct std::formatter<cl::Parse_err>
     auto format(const cl::Parse_err &pe, FormatContext &ctx) const;
 };
 
-#define CL_IMPLEMENTATION
 #ifdef CL_IMPLEMENTATION
 #include <charconv>
+#include <cctype>
+#include <stdexcept>
 #include <ranges>
 #include <iostream>
 #include <iomanip>
@@ -961,10 +960,10 @@ constexpr std::string_view type_name()
 #endif
 }
 
-cl::Parser::Parser(std::string s, std::string des, std::size_t reserve) : name_(std::move(s)), description_(std::move(des)), _schema(std::make_shared<detail::Commands_schema>())
+cl::Parser::Parser(std::string s, std::string des, std::size_t reserve) : _name(std::move(s)), _description(std::move(des)), _schema(std::make_shared<detail::Commands_schema>())
 {
     this->_schema->options_.reserve(reserve);
-    runtime_.reserve(reserve);
+    _runtime.reserve(reserve);
     this->add_sub_cmd("GLOBAL", "Global Context", 0);
 }
 
@@ -1066,10 +1065,10 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     // ==================================================================================
     auto id = assign_id();
 
-    if (!opt.args[this->ln_index].empty())
+    if (!opt.args[this->_ln_index].empty())
         validate_long_name(opt.args[1]);
 
-    if (!opt.args[this->sn_index].empty())
+    if (!opt.args[this->_sn_index].empty())
         validate_short_name(opt.args[0]);
 
     // ==================================================================================
@@ -1217,7 +1216,7 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
     rt.runtime_value = default_rt_val;
 
     this->_schema->options_.push_back(o);
-    runtime_.push_back(rt);
+    _runtime.push_back(rt);
 
     // Register to subcommand
     if (opt.sub_cmd_id >= this->_schema->sub_cmds_.size())
@@ -1243,8 +1242,9 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
     Parse_res res{};
     cl::detail::Parse_ctx ctx(args, err, res, this->cfg_);
     res._schema = this->_schema;
-    res._runtime = std::make_shared<std::vector<Runtime>>(this->runtime_);
-    ctx.active_subcomamnd = this->_schema->sub_cmds_[global_command];
+    res._runtime = std::make_shared<std::vector<Runtime>>(this->_runtime);
+    res._visited_subcommands.insert(global_command);
+    ctx._active_subcomamnd = this->_schema->sub_cmds_[global_command];
 
     while (!args.empty())
     {
@@ -1276,7 +1276,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
                 std::string_view sv{env_val};
                 std::vector<std::string_view> env_inputs;
                 env_inputs.push_back(sv);
-                ctx.curr_key = opt->env;
+                ctx._curr_key = opt->env;
                 this->inject_value(ctx, opt, env_inputs);
             }
         }
@@ -1293,7 +1293,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
         if (!rt.parsed && (opt->flags & *Flags::Required))
         {
             // NEW: Only enforce requirement if the option is Global OR belongs to the Active Subcommand
-            if (opt->sub_id == global_command || opt->sub_id == ctx.active_sub_id)
+            if (opt->sub_id == global_command || opt->sub_id == ctx._active_sub_id)
                 err.push_err(opt->names[0], "Required option is missing.");
         }
         if (rt.parsed)
@@ -1350,24 +1350,24 @@ void cl::Parser::handle_long_token(cl::detail::Parse_ctx &ctx, std::string_view 
 {
     std::string_view key = body;
     std::optional<std::string_view> explicit_val = std::nullopt;
-    ctx.curr_key = body;
+    ctx._curr_key = body;
 
     if (size_t eq_pos = body.find('='); eq_pos != std::string_view::npos)
     {
         if (this->cfg_.value_binding == Binding_type::Next)
             return ctx.error("Equals '=' binding is disabled by configuration.");
         key = body.substr(0, eq_pos);
-        ctx.curr_key = key;
+        ctx._curr_key = key;
         explicit_val = body.substr(eq_pos + 1);
     }
 
-    auto it = ctx.active_subcomamnd->long_arg_to_id_.find(key);
-    if (it == ctx.active_subcomamnd->long_arg_to_id_.end())
+    auto it = ctx._active_subcomamnd->long_arg_to_id_.find(key);
+    if (it == ctx._active_subcomamnd->long_arg_to_id_.end())
         return ctx.error("Unknown option");
 
     detail::Option *opt = this->_schema->options_[it->second];
 
-    if (opt->sub_id != global_command && opt->sub_id != ctx.active_sub_id)
+    if (opt->sub_id != global_command && opt->sub_id != ctx._active_sub_id)
         return ctx.error("Option '--{}' is not valid in the current context.", key);
 
     acquire_value(ctx, opt, explicit_val);
@@ -1378,24 +1378,24 @@ void cl::Parser::handle_short_token(cl::detail::Parse_ctx &ctx, std::string_view
     if (body.empty())
         return;
     std::string_view key = body.substr(0, 1);
-    ctx.curr_key = key;
+    ctx._curr_key = key;
 
-    auto it = ctx.active_subcomamnd->short_arg_to_id_.find(key);
-    if (it == ctx.active_subcomamnd->short_arg_to_id_.end())
+    auto it = ctx._active_subcomamnd->short_arg_to_id_.find(key);
+    if (it == ctx._active_subcomamnd->short_arg_to_id_.end())
         return ctx.error("Unknown flag -{}", key);
 
     detail::Option *opt = this->_schema->options_[it->second];
 
-    if (opt->sub_id != global_command && opt->sub_id != ctx.active_sub_id)
+    if (opt->sub_id != global_command && opt->sub_id != ctx._active_sub_id)
         return ctx.error("Flag '-{}' is not valid in the current context.", key);
 
     if (opt->arity == 0)
     {
-        this->assign_true(ctx.res._runtime->at(opt->id));
+        this->assign_true(ctx._res._runtime->at(opt->id));
         // If characters remain, handle them recursively
         if (body.size() > 1)
         {
-            if (!ctx.cfg.allow_combined_short_flags)
+            if (!ctx._cfg.allow_combined_short_flags)
                 return ctx.error("Combined short flags are disabled.");
 
             this->add_short_combined(ctx, body.substr(1));
@@ -1408,12 +1408,12 @@ void cl::Parser::handle_short_token(cl::detail::Parse_ctx &ctx, std::string_view
     if (body.size() > 1)
     {
         // Check if user is trying to attach a value
-        if (!ctx.cfg.allow_short_value_concat)
+        if (!ctx._cfg.allow_short_value_concat)
             return ctx.error("Concatenated values disabled.");
 
         // Handle edge case: -j=4 vs -j4
         // Only strip '=' if the binding config allows it (Equal or Both)
-        if (body[1] == '=' && ctx.cfg.value_binding != Binding_type::Next)
+        if (body[1] == '=' && ctx._cfg.value_binding != Binding_type::Next)
             attached_val = body.substr(2);  // Skip flag and '='
         else
             attached_val = body.substr(1);  // Skip just the flag, rest is value
@@ -1428,9 +1428,9 @@ bool cl::Parser::add_short_combined(cl::detail::Parse_ctx &ctx, std::string_view
     for (auto x : body)
     {
         std::string_view curr_key{&x, 1};
-        auto it = ctx.active_subcomamnd->short_arg_to_id_.find(curr_key);
-        ctx.curr_key = curr_key;
-        if (it == ctx.active_subcomamnd->short_arg_to_id_.end())
+        auto it = ctx._active_subcomamnd->short_arg_to_id_.find(curr_key);
+        ctx._curr_key = curr_key;
+        if (it == ctx._active_subcomamnd->short_arg_to_id_.end())
         {
             ctx.error("Unknown flag");
             return false;
@@ -1443,14 +1443,14 @@ bool cl::Parser::add_short_combined(cl::detail::Parse_ctx &ctx, std::string_view
             return false;
         }
 
-        this->assign_true((*ctx.res._runtime)[curr_opt->id]);
+        this->assign_true((*ctx._res._runtime)[curr_opt->id]);
     }
     return true;
 }
 
 bool cl::Parser::acquire_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, std::optional<std::string_view> explicit_val)
 {
-    auto &rt = (*ctx.res._runtime)[opt->id];
+    auto &rt = (*ctx._res._runtime)[opt->id];
 
     if (rt.parsed && !(opt->flags & *Flags::Multi) && (opt->arity == 1))
     {
@@ -1519,23 +1519,23 @@ bool cl::Parser::acquire_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, 
             // Fetch N items
             for (size_t i{}; i < opt->arity; ++i)
             {
-                if (ctx.args.empty())
+                if (ctx._args.empty())
                 {
                     ctx.error("Not enough arguments for array.");
                     return false;
                 }
-                raw_inputs.push_back(ctx.args.pop());
+                raw_inputs.push_back(ctx._args.pop());
             }
         }
         else
         {
             // Fetch 1 item (might be delimited string)
-            if (ctx.args.empty())
+            if (ctx._args.empty())
             {
                 ctx.error("Value not provided.");
                 return false;
             }
-            std::string_view val = ctx.args.pop();
+            std::string_view val = ctx._args.pop();
 
             // Check for delimiter splitting again
             bool split_needed = (opt->arity > 1 && opt->list_cfg.type == List_type::Delimited) ||
@@ -1559,10 +1559,10 @@ bool cl::Parser::acquire_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, 
 
 void cl::Parser::inject_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, std::span<const std::string_view> raw_values)
 {
-    auto &rt = (*ctx.res._runtime)[opt->id];
+    auto &rt = (*ctx._res._runtime)[opt->id];
 
     // Ensure error reporting knows context (optional, but safe)
-    ctx.curr_key = opt->names[0];
+    ctx._curr_key = opt->names[0];
     bool result = false;
 
     std::visit(
@@ -1601,7 +1601,7 @@ void cl::Parser::inject_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, s
                             // Validate Array Size safely here
                             if (i >= storage.size())
                             {
-                                if (!ctx.cfg.allow_empty_arrays)
+                                if (!ctx._cfg.allow_empty_arrays)
                                     ctx.error("Internal Error: Target array size {} too small for input index {}.", storage.size(), i);
                                 return;
                             }
@@ -1724,38 +1724,38 @@ inline auto cl::Parser::add_positional_impl(Opt<T> opt) -> Opt_id
 
     // 6. Register
     this->_schema->options_.push_back(o);
-    runtime_.push_back(Runtime{.runtime_value = o->default_value});
+    _runtime.push_back(Runtime{.runtime_value = o->default_value});
 
     // IMPORTANT: Track this as a positional
-    this->positional_ids_.push_back(id);
+    this->_positional_ids.push_back(id);
 
     return id;
 }
 
 inline void cl::Parser::handle_positional_and_subcmds(cl::detail::Parse_ctx &ctx, std::string_view value)
 {
-    if (auto it = ctx.active_subcomamnd->child_to_id.find(value); it != ctx.active_subcomamnd->child_to_id.end())
+    if (auto it = ctx._active_subcomamnd->child_to_id.find(value); it != ctx._active_subcomamnd->child_to_id.end())
     {
-        ctx.active_sub_id = it->second;
-        ctx.active_subcomamnd = this->_schema->sub_cmds_[ctx.active_sub_id];
-        ctx.res._visited_subcommands.insert(ctx.active_sub_id);
+        ctx._active_sub_id = it->second;
+        ctx._active_subcomamnd = this->_schema->sub_cmds_[ctx._active_sub_id];
+        ctx._res._visited_subcommands.insert(ctx._active_sub_id);
         return;
     }
-    else if (auto it = this->_schema->sub_cmds_[global_command]->child_to_id.find(value); it != ctx.active_subcomamnd->child_to_id.end())
+    else if (auto it = this->_schema->sub_cmds_[global_command]->child_to_id.find(value); it != ctx._active_subcomamnd->child_to_id.end())
     {
-        ctx.active_sub_id = it->second;
-        ctx.active_subcomamnd = this->_schema->sub_cmds_[ctx.active_sub_id];
-        ctx.res._visited_subcommands.insert(ctx.active_sub_id);
+        ctx._active_sub_id = it->second;
+        ctx._active_subcomamnd = this->_schema->sub_cmds_[ctx._active_sub_id];
+        ctx._res._visited_subcommands.insert(ctx._active_sub_id);
         return;
     }
     // Check if we have any positionals left to fill for the current command
-    if (ctx.positional_ind >= positional_ids_.size())
+    if (ctx._positional_ind >= _positional_ids.size())
     {
         ctx.error("Unexpected positional argument: '{}'", value);
         return;
     }
 
-    Opt_id id = positional_ids_[ctx.positional_ind];
+    Opt_id id = _positional_ids[ctx._positional_ind];
     detail::Option *opt = this->_schema->options_[id];
 
     // Inject the value
@@ -1764,7 +1764,7 @@ inline void cl::Parser::handle_positional_and_subcmds(cl::detail::Parse_ctx &ctx
     this->inject_value(ctx, opt, std::span(arr_input));
 
     // Since it's strictly scalar, we ALWAYS move to the next positional
-    ctx.positional_ind++;
+    ctx._positional_ind++;
 }
 
 
@@ -1822,11 +1822,11 @@ inline auto cl::Parser::add_sub_cmd(const std::string &name, const std::string &
 template <typename... Args>
 void cl::detail::Parse_ctx::error(std::format_string<Args...> fmt, Args &&...a)
 {
-    err.push_err(this->curr_key, fmt, std::forward<Args>(a)...);
+    _err.push_err(this->_curr_key, fmt, std::forward<Args>(a)...);
 
-    while (!args.empty())
+    while (!_args.empty())
     {
-        auto t = args.peek();
+        auto t = _args.peek();
         // Stop if we see something that looks like a flag
         if (t)
         {
@@ -1835,34 +1835,40 @@ void cl::detail::Parse_ctx::error(std::format_string<Args...> fmt, Args &&...a)
             if (t->starts_with("-") && t->size() == 2 && std::isalpha((*t)[1]))
                 return;
         }
-        args.pop();
+        _args.pop();
     }
 }
 
 auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optional<Opt_id> opt_id) -> void
 {
     // 1. Validate
-    if (sub_id >= this->_schema->sub_cmds_.size()) return;
-    Subcommand* sub = this->_schema->sub_cmds_[sub_id];
+    if (sub_id >= this->_schema->sub_cmds_.size())
+        return;
+    Subcommand *sub = this->_schema->sub_cmds_[sub_id];
 
     // 2. Option Drill-Down (Detailed Technical View)
     if (opt_id.has_value())
     {
         Opt_id oid = *opt_id;
-        if (oid >= this->_schema->options_.size()) return;
-        detail::Option* opt = this->_schema->options_[oid];
+        if (oid >= this->_schema->options_.size())
+            return;
+        detail::Option *opt = this->_schema->options_[oid];
 
         os << "\nOPTION: " << detail::format_option_flags(opt) << "\n";
         os << std::string(60, '-') << "\n";
         os << " " << (opt->desc.empty() ? "No description." : opt->desc) << "\n\n";
         os << " Type:    " << opt->type << "\n";
         os << " Arity:   " << opt->arity << "\n";
-        if (opt->flags & *Flags::Required)      os << " Status:  Required\n";
-        if (opt->flags & *Flags::Env)           os << " Env:     " << opt->env << "\n";
-        if (opt->flags & *Flags::Default)       os << " Default: " << opt->default_hints << "\n";
-        if (!opt->validator_helps.empty()) {
+        if (opt->flags & *Flags::Required)
+            os << " Status:  Required\n";
+        if (opt->flags & *Flags::Env)
+            os << " Env:     " << opt->env << "\n";
+        if (opt->flags & *Flags::Default)
+            os << " Default: " << opt->default_hints << "\n";
+        if (!opt->validator_helps.empty())
+        {
             os << " Checks:\n";
-            for(auto& h : opt->validator_helps) os << "   - " << h << "\n";
+            for (auto &h : opt->validator_helps) os << "   - " << h << "\n";
         }
         os << "\n";
         return;
@@ -1872,29 +1878,33 @@ auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optiona
     std::vector<detail::Help_entry> rows;
     size_t max_left = 0;
 
-    auto add_row = [&](std::string l, std::string r) {
-        if (l.size() > max_left) max_left = l.size();
+    auto add_row = [&](std::string l, std::string r)
+    {
+        if (l.size() > max_left)
+            max_left = l.size();
         rows.push_back({l, r, false});
     };
-    auto add_header = [&](std::string t) {
-        rows.push_back({t, "", true});
-    };
+    auto add_header = [&](std::string t) { rows.push_back({t, "", true}); };
 
     // --- USAGE ---
     // Build path: main -> device -> list
     std::vector<std::string_view> path;
-    Subcommand* curr = sub;
-    while (true) {
-        if (curr->id != global_command) path.push_back(curr->name);
-        if (curr->id == curr->parent_id) break;
+    Subcommand *curr = sub;
+    while (true)
+    {
+        if (curr->id != global_command)
+            path.push_back(curr->name);
+        if (curr->id == curr->parent_id)
+            break;
         curr = this->_schema->sub_cmds_[curr->parent_id];
     }
-    
-    os << "USAGE: " << this->name_;
+
+    os << "USAGE: " << this->_name;
     for (auto it = path.rbegin(); it != path.rend(); ++it) os << " " << *it;
 
     // Logic: If children exist -> [COMMAND]. Always show [OPTIONS].
-    if (!sub->child_subcommands.empty()) os << " [COMMAND]";
+    if (!sub->child_subcommands.empty())
+        os << " [COMMAND]";
     os << " [OPTIONS]\n";
 
     // --- DESCRIPTION ---
@@ -1906,16 +1916,16 @@ auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optiona
     if (!sub->child_subcommands.empty())
     {
         add_header("\nCOMMANDS:");
-        
+
         // Simple recursion for indentation
         std::function<void(Subcommand_id, int)> print_subs;
-        print_subs = [&](Subcommand_id sid, int depth) 
+        print_subs = [&](Subcommand_id sid, int depth)
         {
-            Subcommand* s = this->_schema->sub_cmds_[sid];
+            Subcommand *s = this->_schema->sub_cmds_[sid];
             // 2 spaces per level
             std::string indent(depth * 2, ' ');
             add_row(indent + std::string(s->name), std::string(s->description));
-            
+
             // Recurse
             for (auto child_id : s->child_subcommands) print_subs(child_id, depth + 1);
         };
@@ -1925,13 +1935,24 @@ auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optiona
 
     // --- ARGUMENTS (Positionals) ---
     bool has_pos = false;
-    for(auto pid : this->positional_ids_) {
+    for (auto pid : this->_positional_ids)
+    {
         bool belongs = false;
-        for(auto co : sub->child_options) if(co == pid) { belongs = true; break; }
-        
-        if (belongs) {
-            if(!has_pos) { add_header("\nARGUMENTS:"); has_pos = true; }
-            detail::Option* p = this->_schema->options_[pid];
+        for (auto co : sub->child_options)
+            if (co == pid)
+            {
+                belongs = true;
+                break;
+            }
+
+        if (belongs)
+        {
+            if (!has_pos)
+            {
+                add_header("\nARGUMENTS:");
+                has_pos = true;
+            }
+            detail::Option *p = this->_schema->options_[pid];
             add_row(std::format("<{}>", p->names[1]), std::string(p->desc));
         }
     }
@@ -1943,19 +1964,29 @@ auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optiona
     {
         // Skip positionals
         bool is_pos = false;
-        for(auto pid : this->positional_ids_) if(pid == oid) is_pos = true;
-        if(is_pos) continue;
+        for (auto pid : this->_positional_ids)
+            if (pid == oid)
+                is_pos = true;
+        if (is_pos)
+            continue;
 
-        detail::Option* opt = this->_schema->options_[oid];
-        if (opt->flags & *Flags::Hidden) continue;
+        detail::Option *opt = this->_schema->options_[oid];
+        if (opt->flags & *Flags::Hidden)
+            continue;
 
-        if (!has_opts) { add_header("\nOPTIONS:"); has_opts = true; }
-        
+        if (!has_opts)
+        {
+            add_header("\nOPTIONS:");
+            has_opts = true;
+        }
+
         std::string right = std::string(opt->desc);
-        
-        if (opt->flags & *Flags::Required) right += " [Required]";
-        if (opt->flags & *Flags::Env)      right += " [Env: " + std::string(opt->env) + "]";
-        if ((opt->flags & *Flags::Default) && !opt->default_hints.empty()) 
+
+        if (opt->flags & *Flags::Required)
+            right += " [Required]";
+        if (opt->flags & *Flags::Env)
+            right += " [Env: " + std::string(opt->env) + "]";
+        if ((opt->flags & *Flags::Default) && !opt->default_hints.empty())
             right += " [Def: " + std::string(opt->default_hints) + "]";
 
         add_row(detail::format_option_flags(opt), right);
@@ -1963,16 +1994,13 @@ auto cl::Parser::print_help(std::ostream &os, Subcommand_id sub_id, std::optiona
 
     // --- RENDER ---
     size_t pad = max_left + 4;
-    for (const auto& r : rows)
-    {
-        if (r.is_header) os << r.left << "\n";
-        else {
+    for (const auto &r : rows)
+        if (r.is_header)
+            os << r.left << "\n";
+        else
             os << "  " << std::left << std::setw(pad) << r.left << r.right << "\n";
-        }
-    }
     os << "\n";
 }
-
 
 auto std::formatter<cl::Opt_type>::format(cl::Opt_type t, format_context &ctx) const
 {
@@ -2138,7 +2166,7 @@ auto cl::Parse_res::get(std::string_view key) const -> std::optional<T>
                 try {
                     return get<T>(it->second);
                 } catch(...) {
-                    return std::nullopt;
+                    throw;
                 }
             }
         return std::nullopt;
@@ -2159,6 +2187,7 @@ auto cl::Parse_res::get(std::string_view key) const -> std::optional<T>
 auto cl::Parse_res::get_subcmd(Subcommand_id id) const -> std::optional<Parse_res>
 {
     if (id >= this->_schema->sub_cmds_.size()) return std::nullopt;
+    if (!this->_visited_subcommands.contains(id)) return std::nullopt;
     Parse_res out = *this;
     out.curr_subcmd = id;
     return out;

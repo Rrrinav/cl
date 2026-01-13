@@ -1,5 +1,6 @@
-#include <cstdint>
 #include <print>
+
+#define CL_IMPLEMENTATION
 #include "cl.hpp"
 
 int main(int argc, char *argv[])
@@ -29,11 +30,9 @@ int main(int argc, char *argv[])
     auto l = res->get<cl::Text>("add");
     std::println("l: {}", l.value_or("hui-pui"));
 
-    std::println("add nested: {}", res->get_subcmd("software")->get_subcmd("update")->get<cl::Text>("add").value_or("omg chain"));
-    std::println("add but nested in single call: {}", res->get<cl::Text>("software", "update", "add").value_or("omg chain"));
+    auto val = res->get_subcmd("software")->get_subcmd("update")->get<cl::Text>("add").value_or("omg chain");
+    std::println("add nested: {}", val);
 
-    //auto d_res = res->get_sub(d_res);
-    //d_res->get<cl::Num>(d_a);
-    //res->get<cl::Num>("device", "add");
-    //res->get<cl::Num>("add");
+    val = res->get<cl::Text>("software", "update", "add").value_or("omg chain");
+    std::println("add nested but nested in single call: {}", val);
 }
