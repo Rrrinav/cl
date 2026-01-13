@@ -28,6 +28,7 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <variant>
@@ -660,20 +661,38 @@ namespace detail {
     };
 }
 
+// We dont need to write copy cosntructors because we want to do shallow copy since we want to maintain a shared state
+// and the lifetimes are managed by shared pointer;
 struct Parse_res
 {
-    std::shared_ptr<detail::Commands_schema> _schema;
-    std::vector<Runtime> runtime_;
+    std::shared_ptr<detail::Commands_schema> _schema = nullptr;
+    std::shared_ptr<std::vector<Runtime>> _runtime = nullptr;
+    std::unordered_set<Subcommand_id> _visited_subcommands{};
+    Subcommand_id curr_subcmd = global_command;
 
     template <typename T>
     requires Gettable_Type_C<T>
     [[nodiscard]]
-    auto get(Opt_id id) const -> T;
+    auto get(Opt_id id) const -> std::optional<T>;
 
     template <typename T>
     requires Gettable_Type_C<T>
     [[nodiscard]]
     auto get(Opt_id id, T &val) const -> std::expected<void, std::string>;
+
+    template <typename T>
+    requires Gettable_Type_C<T>
+    [[nodiscard]]
+    auto get(std::string_view key) const -> std::optional<T>;
+
+    auto get_subcmd(Subcommand_id id) const -> std::optional<Parse_res>;
+
+    auto get_subcmd(std::string_view key) const -> std::optional<Parse_res>;
+
+    template <typename T, typename... Args>
+    requires Gettable_Type_C<T> && (sizeof...(Args) > 0)
+    [[nodiscard]]
+    auto get(std::string_view subcmd_name, Args &&...rest) const -> std::optional<T>;
 };
 
 inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err);
@@ -1224,8 +1243,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
     Parse_res res{};
     cl::detail::Parse_ctx ctx(args, err, res, this->cfg_);
     res._schema = this->_schema;
-    res.runtime_.resize(this->runtime_.size());
-    std::copy(this->runtime_.begin(), this->runtime_.end(), res.runtime_.begin());
+    res._runtime = std::make_shared<std::vector<Runtime>>(this->runtime_);
     ctx.active_subcomamnd = this->_schema->sub_cmds_[global_command];
 
     while (!args.empty())
@@ -1246,7 +1264,7 @@ auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse
     for (size_t i = 0; i < this->_schema->options_.size(); ++i)
     {
         detail::Option *opt = this->_schema->options_[i];
-        Runtime &rt = res.runtime_[i];
+        Runtime &rt = (*res._runtime)[i];
         // 1. Try Environment Variable (If not parsed from CLI)
         if (!rt.parsed && (opt->flags & *Flags::Env) && !opt->env.empty())
         {
@@ -1373,7 +1391,7 @@ void cl::Parser::handle_short_token(cl::detail::Parse_ctx &ctx, std::string_view
 
     if (opt->arity == 0)
     {
-        this->assign_true(ctx.res.runtime_[opt->id]);
+        this->assign_true(ctx.res._runtime->at(opt->id));
         // If characters remain, handle them recursively
         if (body.size() > 1)
         {
@@ -1425,14 +1443,14 @@ bool cl::Parser::add_short_combined(cl::detail::Parse_ctx &ctx, std::string_view
             return false;
         }
 
-        this->assign_true(ctx.res.runtime_[curr_opt->id]);
+        this->assign_true((*ctx.res._runtime)[curr_opt->id]);
     }
     return true;
 }
 
 bool cl::Parser::acquire_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, std::optional<std::string_view> explicit_val)
 {
-    auto &rt = ctx.res.runtime_[opt->id];
+    auto &rt = (*ctx.res._runtime)[opt->id];
 
     if (rt.parsed && !(opt->flags & *Flags::Multi) && (opt->arity == 1))
     {
@@ -1541,7 +1559,7 @@ bool cl::Parser::acquire_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, 
 
 void cl::Parser::inject_value(cl::detail::Parse_ctx &ctx, detail::Option *opt, std::span<const std::string_view> raw_values)
 {
-    auto &rt = ctx.res.runtime_[opt->id];
+    auto &rt = (*ctx.res._runtime)[opt->id];
 
     // Ensure error reporting knows context (optional, but safe)
     ctx.curr_key = opt->names[0];
@@ -1720,12 +1738,14 @@ inline void cl::Parser::handle_positional_and_subcmds(cl::detail::Parse_ctx &ctx
     {
         ctx.active_sub_id = it->second;
         ctx.active_subcomamnd = this->_schema->sub_cmds_[ctx.active_sub_id];
+        ctx.res._visited_subcommands.insert(ctx.active_sub_id);
         return;
     }
     else if (auto it = this->_schema->sub_cmds_[global_command]->child_to_id.find(value); it != ctx.active_subcomamnd->child_to_id.end())
     {
         ctx.active_sub_id = it->second;
         ctx.active_subcomamnd = this->_schema->sub_cmds_[ctx.active_sub_id];
+        ctx.res._visited_subcommands.insert(ctx.active_sub_id);
         return;
     }
     // Check if we have any positionals left to fill for the current command
@@ -2031,12 +2051,14 @@ auto std::formatter<cl::Parse_err>::format(const cl::Parse_err &pe, FormatContex
 template <typename T>
 requires cl::Gettable_Type_C<T>
 [[nodiscard]]
-auto cl::Parse_res::get(cl::Opt_id id) const -> T
+auto cl::Parse_res::get(cl::Opt_id id) const -> std::optional<T>
 {
-    if (id >= runtime_.size())
-        throw std::invalid_argument(std::format("opt id: {} is not valid.", id));
+    if (id >= _runtime->size())
+        return std::nullopt;
 
-    const auto &val_variant = runtime_[id].runtime_value;
+    if (!(*_runtime)[id].parsed) return std::nullopt;
+
+    const auto &val_variant = (*_runtime)[id].runtime_value;
 
     if constexpr (is_std_array_v<T>)
     {
@@ -2048,7 +2070,11 @@ auto cl::Parse_res::get(cl::Opt_id id) const -> T
     }
     else
     {
-        return std::get<T>(val_variant);
+        try {
+            return std::get<T>(val_variant);
+        } catch(...) {
+            throw;
+        }
     }
 }
 
@@ -2058,10 +2084,12 @@ requires cl::Gettable_Type_C<T>
 [[nodiscard]]
 auto cl::Parse_res::get(Opt_id id, T &val) const -> std::expected<void, std::string>
 {
-    if (id >= runtime_.size())
+    if (id >= _runtime->size())
         return std::unexpected(std::format("[CL Error] Invalid Option ID: {}", id));
 
-    const auto &rt = runtime_[id];
+    const auto &rt = (*_runtime)[id];
+    if (!rt.parsed) return std::unexpected(std::format("Neither was value set now default value provided for: {}", id));
+
     const auto* info = this->_schema->options_.at(id);
 
     bool is_vector = (info->storage == Storage_kind::Vector);
@@ -2086,7 +2114,7 @@ auto cl::Parse_res::get(Opt_id id, T &val) const -> std::expected<void, std::str
     {
         try
         {
-            val = std::get<std::decay_t<T>>(val_variant);
+            auto val = std::get<std::decay_t<T>>(val_variant);
             return {};
         }
         catch (const std::bad_variant_access &)
@@ -2094,6 +2122,70 @@ auto cl::Parse_res::get(Opt_id id, T &val) const -> std::expected<void, std::str
             return std::unexpected("Type Mismatch");
         }
     }
+}
+
+
+template <typename T>
+requires cl::Gettable_Type_C<T>
+[[nodiscard]]
+auto cl::Parse_res::get(std::string_view key) const -> std::optional<T>
+{
+    if (key.length() == 1)
+    {
+        auto& _map = this->_schema->sub_cmds_[curr_subcmd]->short_arg_to_id_;
+        if (auto it = _map.find(key); it != _map.end()) [[likely]]
+            {
+                try {
+                    return get<T>(it->second);
+                } catch(...) {
+                    return std::nullopt;
+                }
+            }
+        return std::nullopt;
+    }
+
+    auto& map = this->_schema->sub_cmds_[curr_subcmd]->long_arg_to_id_;
+    if (auto it = map.find(key); it != map.end()) [[likely]]
+        {
+            try {
+                return this->get<T>(it->second);
+            } catch(...) {
+                throw;
+            }
+        }
+    return std::nullopt;
+}
+
+auto cl::Parse_res::get_subcmd(Subcommand_id id) const -> std::optional<Parse_res>
+{
+    if (id >= this->_schema->sub_cmds_.size()) return std::nullopt;
+    Parse_res out = *this;
+    out.curr_subcmd = id;
+    return out;
+}
+
+auto cl::Parse_res::get_subcmd(std::string_view key) const -> std::optional<Parse_res>
+{
+    auto& _map = this->_schema->sub_cmds_[curr_subcmd]->child_to_id;
+    if (auto it = _map.find(key); it == _map.end()) return std::nullopt;
+    else return this->get_subcmd(it->second);
+}
+
+
+template <typename T, typename... Args>
+requires cl::Gettable_Type_C<T> && (sizeof...(Args) > 0)
+[[nodiscard]]
+auto cl::Parse_res::get(std::string_view subcmd_name, Args &&...rest) const -> std::optional<T>
+{
+    // 1. Try to find the subcommand in the current scope
+    if (auto sub = this->get_subcmd(subcmd_name))
+    {
+        // 2. Recurse: Call get() on the new 'sub' view with the remaining arguments
+        return sub->get<T>(std::forward<Args>(rest)...);
+    }
+
+    // Subcommand not found -> Path is invalid
+    return std::nullopt;
 }
 
 inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err)
