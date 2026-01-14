@@ -2,6 +2,7 @@
 #define CL_HPP_
 
 #include <sys/types.h>
+#include <expected>
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -18,7 +19,6 @@
 #include <memory>
 #include <new>
 #include <optional>
-#include <print>
 #include <source_location>
 #include <span>
 #include <string>
@@ -38,63 +38,20 @@
 namespace cl::debug
 {
 [[noreturn]]
-inline auto todo(std::string &&s, std::source_location loc = std::source_location::current())
-{
-    std::println("{}:{}:{}: [TODO]: {}", loc.file_name(), loc.line(), loc.column(), loc.function_name());
-    std::println("         {}", s);
-    std::exit(EXIT_FAILURE);
-}
-
+auto todo(std::string &&s, std::source_location loc = std::source_location::current()) -> void;
 [[noreturn]]
-inline auto todo(std::source_location loc = std::source_location::current())
-{
-    todo("", loc);
-}
-
+inline auto todo(std::source_location loc = std::source_location::current()) -> void { todo("", loc); }
 }  // namespace cl::debug
 
-namespace cl::asrt
-{
-
+namespace cl::asrt {
 template <typename... Args>
-inline constexpr auto t(bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if (!cond)
-    {
-        std::println(stderr, "[Assert ERR]: {}", std::format(fmt, std::forward<Args>(args)...));
-        std::exit(EXIT_FAILURE);
-    }
-}
-
+constexpr auto t(bool cond, std::format_string<Args...> fmt, Args &&...args) -> void;
 template <typename... Args>
-inline constexpr auto tloc(std::source_location loc, bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if (!cond)
-    {
-        std::println(stderr, "{}:{}: [Assert ERR]: {}", loc.file_name(), loc.line(), std::format(fmt, std::forward<Args>(args)...));
-        std::exit(EXIT_FAILURE);
-    }
-}
-
+constexpr auto f(bool cond, std::format_string<Args...> fmt, Args &&...args) -> void;
 template <typename... Args>
-inline constexpr auto floc(std::source_location loc, bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if (cond)
-    {
-        std::println(stderr, "{}:{}: [Assert ERR]: {}", loc.file_name(), loc.line(), std::format(fmt, std::forward<Args>(args)...));
-        std::exit(EXIT_FAILURE);
-    }
-}
-
+constexpr auto tloc(std::source_location loc, bool cond, std::format_string<Args...> fmt, Args &&...args) -> void;
 template <typename... Args>
-inline constexpr auto f(bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
-{
-    if (cond)
-    {
-        std::println(stderr, "[Assert ERR]: {}", std::format(fmt, std::forward<Args>(args)...));
-        std::exit(EXIT_FAILURE);
-    }
-}
+constexpr auto floc(std::source_location loc, bool cond, std::format_string<Args...> fmt, Args &&...args) -> void;
 
 }  // namespace cl::asrt
 
@@ -691,6 +648,28 @@ struct Parse_res
     requires Gettable_Type_C<T> && (sizeof...(Args) > 0)
     [[nodiscard]]
     auto get(std::string_view subcmd_name, Args &&...rest) const -> std::optional<T>;
+
+    [[nodiscard]]
+    auto is_seen(Opt_id id) -> bool;
+
+    [[nodiscard]]
+    auto is_subcmd_chosen(Subcommand_id id) -> bool;
+
+    [[nodiscard]]
+    auto is_seen(std::string_view key) -> bool;
+
+    template <typename T, typename... Args>
+    requires cl::Gettable_Type_C<T> && (sizeof...(Args) > 0)
+    [[nodiscard]]
+    auto get(T* val, std::string_view subcmd_name, Args &&...rest) const -> std::expected<void, std::string>;
+
+    template <typename T>
+    requires Gettable_Type_C<T>
+    [[nodiscard]]
+    auto get(T* val, std::string_view key) const -> std::expected<void, std::string>;
+
+private:
+    auto get_id_in_curr_scope(std::string_view key) const -> std::optional<Opt_id>;
 };
 
 inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err);
@@ -804,12 +783,67 @@ struct std::formatter<cl::Parse_err>
 };
 
 #ifdef CL_IMPLEMENTATION
+#include <print>
 #include <charconv>
 #include <cctype>
 #include <stdexcept>
 #include <ranges>
 #include <iostream>
 #include <iomanip>
+
+namespace cl::debug {
+auto todo(std::string &&s, std::source_location loc) -> void
+{
+    std::println("{}:{}:{}: [TODO]: {}", loc.file_name(), loc.line(), loc.column(), loc.function_name());
+    std::println("         {}", s);
+    std::exit(EXIT_FAILURE);
+}
+} // cl::debuc>
+
+namespace cl::asrt {
+
+template <typename... Args>
+constexpr auto t(bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
+{
+    if (!cond)
+    {
+        std::println(stderr, "[Assert ERR]: {}", std::format(fmt, std::forward<Args>(args)...));
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+template <typename... Args>
+constexpr auto tloc(std::source_location loc, bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
+{
+    if (!cond)
+    {
+        std::println(stderr, "{}:{}: [Assert ERR]: {}", loc.file_name(), loc.line(), std::format(fmt, std::forward<Args>(args)...));
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+template <typename... Args>
+constexpr auto floc(std::source_location loc, bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
+{
+    if (cond)
+    {
+        std::println(stderr, "{}:{}: [Assert ERR]: {}", loc.file_name(), loc.line(), std::format(fmt, std::forward<Args>(args)...));
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+template <typename... Args>
+constexpr auto f(bool cond, std::format_string<Args...> fmt, Args &&...args) -> void
+{
+    if (cond)
+    {
+        std::println(stderr, "[Assert ERR]: {}", std::format(fmt, std::forward<Args>(args)...));
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+}  // namespace cl::asrt
+
 
 namespace cl::detail {
 template <typename... Args>
@@ -1016,12 +1050,12 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
             throw std::logic_error(std::format("Name: {} already exists in {} scope", __name, (this->_schema->sub_cmds_[opt.sub_cmd_id]->name)));
     };
 
-    auto validate_env_name = [&](std::string_view name)
-    {
-        if (name.empty() || std::isdigit(name[0]))
-            return false;
-        return std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '_'; });
-    };
+    //auto validate_env_name = [&](std::string_view name)
+    //{
+    //    if (name.empty() || std::isdigit(name[0]))
+    //        return false;
+    //    return std::ranges::all_of(name, [](char c) { return std::isalnum(c) || c == '_'; });
+    //};
 
     // ==================================================================================
     // 2. Type Analysis & Storage Configuration
@@ -1234,14 +1268,16 @@ inline auto cl::Parser::add_impl(Opt<T> opt) -> Opt_id
 // -----------------------------------------------------------------------------
 // IMPLEMENTATION: PARSER::PARSE
 // -----------------------------------------------------------------------------
-// TODO: Add proper runtime support for subcommands, so seeing if they were seen and all will be easier.
+// TODO: Make subcommand context switch smarter when going from local to global when they share an option and it appears.
+//       E.g: ./main device wifi --add "wifi" --add "global"
+//       Here first add must be local inside device and wifi and second to nearest scope containing it, if it is not multi
 auto cl::Parser::parse(int argc, char *argv[]) -> std::expected<Parse_res, Parse_err>
 {
     detail::Arg_stream args(argc, argv);
     Parse_err err{};
     Parse_res res{};
     cl::detail::Parse_ctx ctx(args, err, res, this->cfg_);
-    res._schema = this->_schema;
+    res._schema  = this->_schema;
     res._runtime = std::make_shared<std::vector<Runtime>>(this->_runtime);
     res._visited_subcommands.insert(global_command);
     ctx._active_subcomamnd = this->_schema->sub_cmds_[global_command];
@@ -2158,29 +2194,14 @@ requires cl::Gettable_Type_C<T>
 [[nodiscard]]
 auto cl::Parse_res::get(std::string_view key) const -> std::optional<T>
 {
-    if (key.length() == 1)
+    if (auto id = this->get_id_in_curr_scope(key); id)
     {
-        auto& _map = this->_schema->sub_cmds_[curr_subcmd]->short_arg_to_id_;
-        if (auto it = _map.find(key); it != _map.end()) [[likely]]
-            {
-                try {
-                    return get<T>(it->second);
-                } catch(...) {
-                    throw;
-                }
-            }
-        return std::nullopt;
-    }
-
-    auto& map = this->_schema->sub_cmds_[curr_subcmd]->long_arg_to_id_;
-    if (auto it = map.find(key); it != map.end()) [[likely]]
-        {
-            try {
-                return this->get<T>(it->second);
-            } catch(...) {
-                throw;
-            }
+        try {
+            return this->get<T>(*id);
+        } catch(...) {
+            throw;
         }
+    }
     return std::nullopt;
 }
 
@@ -2216,6 +2237,82 @@ auto cl::Parse_res::get(std::string_view subcmd_name, Args &&...rest) const -> s
     // Subcommand not found -> Path is invalid
     return std::nullopt;
 }
+
+template <typename T, typename... Args>
+requires cl::Gettable_Type_C<T> && (sizeof...(Args) > 0)
+[[nodiscard]]
+auto cl::Parse_res::get(T* val, std::string_view subcmd_name, Args &&...rest) const -> std::expected<void, std::string>
+{
+    // 1. Try to find the subcommand in the current scope
+    if (auto sub = this->get_subcmd(subcmd_name))
+    {
+        // 2. Recurse: Call get() on the new 'sub' view with the remaining arguments
+        return sub->get<T>(val, std::forward<Args>(rest)...);
+    }
+
+    return std::unexpected(std::format("Subcommand: {} doesnt exist or wasn't set.", subcmd_name));
+}
+
+template <typename T>
+requires cl::Gettable_Type_C<T>
+[[nodiscard]]
+auto cl::Parse_res::get(T *val, std::string_view key) const -> std::expected<void, std::string>
+{
+    if (!val)
+        return std::unexpected("Output pointer is null");
+
+    // 1. Find the ID in the current scope
+    auto opt_id = this->get_id_in_curr_scope(key);
+
+    if (!opt_id)
+        return std::unexpected(std::format("Option '{}' not found in the current context.", key));
+
+    // 2. Delegate to the existing ID-based getter (get(id, T&))
+    // We dereference the pointer *val to pass it as a reference
+    return this->get<T>(*opt_id, *val);
+}
+
+
+auto cl::Parse_res::is_seen(Opt_id id) -> bool
+{
+    if (id >= this->_runtime->size()) return false;
+    if ((*this->_runtime)[id].parsed || (*this->_runtime)[id].count > 0) return true;
+    return false;
+}
+
+auto cl::Parse_res::is_subcmd_chosen(Subcommand_id id) -> bool
+{
+    if (this->_visited_subcommands.contains(id)) return true;
+    return false;
+}
+
+auto cl::Parse_res::is_seen(std::string_view key) -> bool
+{
+    if (auto id = this->get_id_in_curr_scope(key); id)
+        return (((*this->_runtime)[*id].parsed) || ((*this->_runtime)[*id].count > 0));
+    else
+        return false;
+}
+
+auto cl::Parse_res::get_id_in_curr_scope(std::string_view key) const -> std::optional<Opt_id>
+{
+    if (key.length() == 1)
+    {
+        auto &_map = this->_schema->sub_cmds_[curr_subcmd]->short_arg_to_id_;
+        if (auto it = _map.find(key); it != _map.end())
+            return it->second;
+        return std::nullopt;
+    }
+
+    auto &map = this->_schema->sub_cmds_[curr_subcmd]->long_arg_to_id_;
+    if (auto it = map.find(key); it != map.end())
+        return it->second;
+    return std::nullopt;
+}
+
+
+
+
 
 inline std::ostream &operator<<(std::ostream &os, const cl::Parse_err &err)
 {
