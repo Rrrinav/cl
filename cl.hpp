@@ -2178,7 +2178,7 @@ auto cl::Parse_res::get(Opt_id id, T &val) const -> std::expected<void, std::str
     {
         try
         {
-            auto val = std::get<std::decay_t<T>>(val_variant);
+            val = std::get<std::decay_t<T>>(val_variant);
             return {};
         }
         catch (const std::bad_variant_access &)
